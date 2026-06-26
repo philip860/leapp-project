@@ -5,6 +5,7 @@
   gather_facts: true
   become: true
   force_handlers: true
+
   pre_tasks:
     - name: Register output of 'yum repolist'
       ansible.builtin.shell: |
@@ -13,17 +14,60 @@
       args:
         executable: /bin/bash
       register: yum_repolist
-      changed_when: yum_repolist.rc != 0
+      changed_when: false
 
-    # Determine if node is an EC2 Marketplace instance utilzing RHUI
+    - name: Check if leapp command exists
+      ansible.builtin.command: command -v leapp
+      register: leapp_command_check
+      changed_when: false
+      failed_when: false
+
+    - name: Attempt to install leapp package when missing on RHEL 8+
+      ansible.builtin.dnf:
+        name: leapp
+        state: present
+      register: leapp_install_result
+      when:
+        - leapp_command_check.rc != 0
+        - ansible_distribution_major_version | int >= 8
+      failed_when: false
+
+    - name: Attempt to install leapp package when missing on RHEL 7
+      ansible.builtin.yum:
+        name: leapp
+        state: present
+      register: leapp_install_result_el7
+      when:
+        - leapp_command_check.rc != 0
+        - ansible_distribution_major_version | int == 7
+      failed_when: false
+
+    - name: Re-check if leapp command exists after install attempt
+      ansible.builtin.command: command -v leapp
+      register: leapp_command_recheck
+      changed_when: false
+      failed_when: false
+      when: leapp_command_check.rc != 0
+
+    - name: Fail clearly when leapp package is missing
+      ansible.builtin.fail:
+        msg: >-
+          Missing leapp package. The leapp command was not found, and Ansible
+          attempted to install the leapp package but it is still unavailable.
+          Verify that the correct RHEL Leapp repositories are enabled for this host.
+      when:
+        - leapp_command_check.rc != 0
+        - leapp_command_recheck.rc != 0
+
+    # Determine if node is an EC2 Marketplace instance utilizing RHUI
     - name: Set fact for RHUI RHEL extras repo name when EC2 and utilizing RHUI
       ansible.builtin.set_fact:
         analysis_repos_el7: "rhel-7-server-rhui-extras-rpms"
       when:
         - ansible_system_vendor == "Amazon EC2" or ansible_system_vendor == "Xen"
-        - ansible_product_uuid|regex_search('^ec2') or ansible_product_uuid|regex_search('^EC2')
+        - ansible_product_uuid | regex_search('^ec2') or ansible_product_uuid | regex_search('^EC2')
         - "'rhui' in yum_repolist.stdout"
-        - ansible_distribution_major_version|int == 7
+        - ansible_distribution_major_version | int == 7
 
     - name: Set analysis package list facts for preupgrade analysis for RHUI Marketplace Leapp upgrades
       ansible.builtin.set_fact:
@@ -41,10 +85,12 @@
           - vdo
       when:
         - ansible_system_vendor == "Amazon EC2" or ansible_system_vendor == "Xen"
-        - ansible_product_uuid|regex_search('^ec2') or ansible_product_uuid|regex_search('^EC2')
+        - ansible_product_uuid | regex_search('^ec2') or ansible_product_uuid | regex_search('^EC2')
         - "'rhui' in yum_repolist.stdout"
+
   roles:
     - infra.leapp.analysis
+
   tasks:
     - name: Confirm check_vdo True in leapp answerfile
       ansible.builtin.replace:
