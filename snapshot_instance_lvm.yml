@@ -15,8 +15,8 @@
       - remove
       - revert
 
-    # false = warn and skip safely
-    # true  = fail job when requested volumes are missing
+    # false = alert and skip safely
+    # true  = fail the job when requested LVM volumes are missing
     lvm_snapshots_fail_when_no_matching_lvs: false
 
   tasks:
@@ -27,11 +27,33 @@
           - lvm_snapshots_action in lvm_snapshots_valid_actions
         fail_msg: "lvm_snapshots_action must be one of: {{ lvm_snapshots_valid_actions | join(', ') }}"
 
-    - name: Set snapshot set names
+    - name: Set snapshot variables
       ansible.builtin.set_fact:
-        snapshot_create_set_name: "{{ snapshot_set_name }}"
-        snapshot_remove_set_name: "{{ snapshot_set_name }}"
-        snapshot_revert_set_name: "{{ snapshot_set_name }}"
+        snapshot_create_set_name: "{{ snapshot_set_name | default('snapshot-set') }}"
+        snapshot_remove_set_name: "{{ snapshot_set_name | default('snapshot-set') }}"
+        snapshot_revert_set_name: "{{ snapshot_set_name | default('snapshot-set') }}"
+        snapshot_create_volumes_safe: "{{ snapshot_create_volumes | default([]) }}"
+
+    - name: Detect platform type
+      ansible.builtin.command:
+        cmd: systemd-detect-virt
+      register: snapshot_platform_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Gather filesystem layout
+      ansible.builtin.command:
+        cmd: df -hT
+      register: snapshot_df
+      changed_when: false
+      failed_when: false
+
+    - name: Gather block device layout
+      ansible.builtin.command:
+        cmd: lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINT
+      register: snapshot_lsblk
+      changed_when: false
+      failed_when: false
 
     - name: Gather existing LVM logical volumes
       ansible.builtin.command:
@@ -70,10 +92,10 @@
       ansible.builtin.set_fact:
         lvm_snapshot_existing_vgs: "{{ lvm_snapshot_existing_volumes | map(attribute='vg') | unique | list }}"
 
-    - name: Build eligible snapshot volume list
+    - name: Build eligible LVM snapshot volume list
       ansible.builtin.set_fact:
         lvm_snapshot_eligible_volumes: "{{ lvm_snapshot_eligible_volumes + [item] }}"
-      loop: "{{ snapshot_create_volumes | default([]) }}"
+      loop: "{{ snapshot_create_volumes_safe }}"
       when:
         - item.vg is defined
         - item.lv is defined
@@ -83,10 +105,10 @@
           | list
           | length > 0
 
-    - name: Build missing snapshot volume list
+    - name: Build missing LVM snapshot volume list
       ansible.builtin.set_fact:
         lvm_snapshot_missing_volumes: "{{ lvm_snapshot_missing_volumes + [item] }}"
-      loop: "{{ snapshot_create_volumes | default([]) }}"
+      loop: "{{ snapshot_create_volumes_safe }}"
       when:
         - item.vg is defined
         - item.lv is defined
@@ -96,24 +118,68 @@
           | list
           | length == 0
 
-    - name: ALERT - Host has no LVM volumes
+    - name: LVM snapshot readiness summary
       ansible.builtin.debug:
         msg:
-          - "ALERT: This host has no detected LVM logical volumes."
-          - "No LVM snapshot will be created, checked, removed, or reverted on this host."
-          - "This commonly happens on AWS EC2 instances using a direct partition such as /dev/nvme0n1p3 for /."
-          - "Requested snapshot volumes were: {{ snapshot_create_volumes | default([]) }}"
+          - "Snapshot workflow type: LVM only"
+          - "Snapshot action requested: {{ lvm_snapshots_action }}"
+          - "Snapshot set name: {{ snapshot_create_set_name }}"
+          - "Detected platform: {{ snapshot_platform_detect.stdout | default('bare-metal-or-unknown') }}"
+          - "Detected LVM volume groups: {{ lvm_snapshot_existing_vgs }}"
+          - "Detected LVM logical volumes: {{ lvm_snapshot_existing_volumes }}"
+          - "Requested LVM snapshot volumes: {{ snapshot_create_volumes_safe }}"
+          - "Eligible LVM snapshot volumes: {{ lvm_snapshot_eligible_volumes }}"
+          - "Missing requested LVM volumes: {{ lvm_snapshot_missing_volumes }}"
+
+    - name: ALERT - No snapshot_create_volumes provided
+      ansible.builtin.debug:
+        msg:
+          - "ALERT: snapshot_create_volumes was not provided or is empty."
+          - "This is an LVM-only snapshot workflow."
+          - "No VG/LV list was supplied by AAP survey or extra variables."
+          - "No LVM snapshot will be created on this host."
+      when:
+        - snapshot_create_volumes_safe | length == 0
+
+    - name: ALERT - Bare metal host has no LVM
+      ansible.builtin.debug:
+        msg:
+          - "ALERT: This appears to be a bare metal host, but no LVM logical volumes were detected."
+          - "This is an LVM-only snapshot workflow."
+          - "No LVM snapshot was created."
+          - "Filesystem layout:"
+          - "{{ snapshot_df.stdout_lines | default([]) }}"
+          - "Block device layout:"
+          - "{{ snapshot_lsblk.stdout_lines | default([]) }}"
       when:
         - lvm_snapshot_existing_volumes | length == 0
+        - snapshot_platform_detect.rc != 0
+          or snapshot_platform_detect.stdout in ['', 'none']
+
+    - name: ALERT - Virtual/cloud host has no LVM
+      ansible.builtin.debug:
+        msg:
+          - "ALERT: This host appears to be virtualized or cloud-based, but no LVM logical volumes were detected."
+          - "Detected platform: {{ snapshot_platform_detect.stdout | default('unknown') }}"
+          - "This is an LVM-only snapshot workflow."
+          - "No LVM snapshot was created."
+          - "Filesystem layout:"
+          - "{{ snapshot_df.stdout_lines | default([]) }}"
+          - "Block device layout:"
+          - "{{ snapshot_lsblk.stdout_lines | default([]) }}"
+      when:
+        - lvm_snapshot_existing_volumes | length == 0
+        - snapshot_platform_detect.rc == 0
+        - snapshot_platform_detect.stdout not in ['', 'none']
 
     - name: ALERT - Requested VG/LV pairs are missing
       ansible.builtin.debug:
         msg:
-          - "ALERT: Some requested LVM volumes do not exist on this host and will NOT be snapshotted."
-          - "Missing requested volumes: {{ lvm_snapshot_missing_volumes }}"
-          - "Detected volume groups on this host: {{ lvm_snapshot_existing_vgs }}"
-          - "Detected logical volumes on this host: {{ lvm_snapshot_existing_volumes }}"
-          - "Eligible volumes that will be processed: {{ lvm_snapshot_eligible_volumes }}"
+          - "ALERT: Some requested VG/LV pairs do not exist on this host."
+          - "These requested volumes will NOT be snapshotted:"
+          - "{{ lvm_snapshot_missing_volumes }}"
+          - "Existing LVM volumes on this host:"
+          - "{{ lvm_snapshot_existing_volumes }}"
       when:
         - lvm_snapshot_missing_volumes | length > 0
 
@@ -121,6 +187,8 @@
       ansible.builtin.fail:
         msg: >-
           No requested LVM volumes were found on this host.
+          This is an LVM-only snapshot workflow.
+          No snapshot was created.
           Missing requested volumes: {{ lvm_snapshot_missing_volumes }}.
           Existing LVM volumes: {{ lvm_snapshot_existing_volumes }}.
       when:
@@ -131,13 +199,13 @@
       ansible.builtin.debug:
         msg:
           - "SKIPPED: Snapshot action '{{ lvm_snapshots_action }}' was not performed on this host."
-          - "Reason: none of the requested VG/LV pairs exist."
-          - "Missing requested volumes: {{ lvm_snapshot_missing_volumes }}"
+          - "Reason: no requested LVM VG/LV pairs exist on this system."
+          - "This is safe behavior for this LVM-only snapshot workflow."
       when:
         - lvm_snapshot_eligible_volumes | length == 0
         - not lvm_snapshots_fail_when_no_matching_lvs | bool
 
-    - name: Execute snapshot check
+    - name: Execute LVM snapshot check
       ansible.builtin.include_role:
         name: infra.lvm_snapshots.snapshot_create
       vars:
@@ -147,7 +215,7 @@
         - lvm_snapshots_action == "check"
         - lvm_snapshot_eligible_volumes | length > 0
 
-    - name: Execute snapshot create
+    - name: Execute LVM snapshot create
       ansible.builtin.include_role:
         name: infra.lvm_snapshots.snapshot_create
       vars:
@@ -156,7 +224,7 @@
         - lvm_snapshots_action == "create"
         - lvm_snapshot_eligible_volumes | length > 0
 
-    - name: Execute snapshot remove
+    - name: Execute LVM snapshot remove
       ansible.builtin.include_role:
         name: infra.lvm_snapshots.snapshot_remove
       vars:
@@ -165,7 +233,7 @@
         - lvm_snapshots_action == "remove"
         - lvm_snapshot_eligible_volumes | length > 0
 
-    - name: Execute snapshot revert
+    - name: Execute LVM snapshot revert
       ansible.builtin.include_role:
         name: infra.lvm_snapshots.snapshot_revert
       vars:
