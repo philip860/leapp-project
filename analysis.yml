@@ -22,6 +22,16 @@
       changed_when: false
       failed_when: false
 
+    - name: Show leapp package status
+      ansible.builtin.debug:
+        msg: >-
+          Leapp package status for {{ inventory_hostname }}:
+          {% if leapp_command_check.rc == 0 %}
+          INSTALLED - leapp command found at {{ leapp_command_check.stdout }}.
+          {% else %}
+          MISSING - leapp command was not found. Attempting to install the leapp package.
+          {% endif %}
+
     - name: Attempt to install leapp package when missing on RHEL 8+
       ansible.builtin.dnf:
         name: leapp
@@ -42,6 +52,20 @@
         - ansible_distribution_major_version | int == 7
       failed_when: false
 
+    - name: Show leapp install attempt result
+      ansible.builtin.debug:
+        msg: >-
+          Leapp install attempt for {{ inventory_hostname }}:
+          {% if leapp_command_check.rc == 0 %}
+          SKIPPED - leapp was already installed.
+          {% elif ansible_distribution_major_version | int >= 8 and leapp_install_result is defined %}
+          INSTALL ATTEMPTED - dnf install leapp completed with rc={{ leapp_install_result.rc | default('unknown') }}.
+          {% elif ansible_distribution_major_version | int == 7 and leapp_install_result_el7 is defined %}
+          INSTALL ATTEMPTED - yum install leapp completed.
+          {% else %}
+          INSTALL NOT ATTEMPTED - unsupported or unknown RHEL version.
+          {% endif %}
+
     - name: Re-check if leapp command exists after install attempt
       ansible.builtin.command: command -v leapp
       register: leapp_command_recheck
@@ -49,12 +73,25 @@
       failed_when: false
       when: leapp_command_check.rc != 0
 
+    - name: Show final leapp readiness status
+      ansible.builtin.debug:
+        msg: >-
+          Final Leapp readiness for {{ inventory_hostname }}:
+          {% if leapp_command_check.rc == 0 %}
+          READY - leapp was already installed.
+          {% elif leapp_command_recheck.rc == 0 %}
+          READY - leapp was missing but was successfully installed at {{ leapp_command_recheck.stdout }}.
+          {% else %}
+          NOT READY - leapp is still missing after install attempt.
+          {% endif %}
+
     - name: Fail clearly when leapp package is missing
       ansible.builtin.fail:
         msg: >-
-          Missing leapp package. The leapp command was not found, and Ansible
-          attempted to install the leapp package but it is still unavailable.
-          Verify that the correct RHEL Leapp repositories are enabled for this host.
+          Missing leapp package on {{ inventory_hostname }}.
+          The leapp command was not found, and Ansible attempted to install it,
+          but it is still unavailable. Verify that the required Leapp repositories
+          are enabled for this RHEL host.
       when:
         - leapp_command_check.rc != 0
         - leapp_command_recheck.rc != 0
