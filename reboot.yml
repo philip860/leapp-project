@@ -1,0 +1,58 @@
+---
+- name: Reboot host
+  hosts: "{{ rhel_inventory_group | default(omit) }}"
+  strategy: free
+  become: true
+  gather_facts: false
+
+  vars:
+    reboot_connect_timeout: 20
+    reboot_pre_reboot_delay: 5
+    reboot_post_reboot_delay: 30
+    reboot_timeout: 1800
+    reboot_test_command: /bin/true
+
+  tasks:
+    - name: Wait for host to be reachable before reboot
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 10
+        delay: 0
+
+    - name: Gather facts before reboot
+      ansible.builtin.setup:
+
+    - name: Show reboot target
+      ansible.builtin.debug:
+        msg:
+          - "Rebooting {{ inventory_hostname }}"
+          - "Detected OS: {{ ansible_facts.distribution | default('unknown') }} {{ ansible_facts.distribution_version | default('unknown') }}"
+          - "Platform vendor: {{ ansible_facts.system_vendor | default('unknown') }}"
+          - "Virtualization type: {{ ansible_facts.virtualization_type | default('unknown') }}"
+          - "Virtualization role: {{ ansible_facts.virtualization_role | default('unknown') }}"
+
+    - name: Reboot host and wait for it to return
+      ansible.builtin.reboot:
+        msg: "Reboot triggered by AAP RHEL upgrade workflow."
+        connect_timeout: "{{ reboot_connect_timeout }}"
+        pre_reboot_delay: "{{ reboot_pre_reboot_delay }}"
+        post_reboot_delay: "{{ reboot_post_reboot_delay }}"
+        reboot_timeout: "{{ reboot_timeout }}"
+        test_command: "{{ reboot_test_command }}"
+      register: reboot_result
+
+    - name: Wait for SSH after reboot
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ reboot_timeout }}"
+        sleep: 15
+        delay: 10
+
+    - name: Gather facts after reboot
+      ansible.builtin.setup:
+
+    - name: Show reboot result
+      ansible.builtin.debug:
+        msg:
+          - "Reboot completed for {{ inventory_hostname }}"
+          - "Elapsed reboot time: {{ reboot_result.elapsed | default('unknown') }} seconds"
+          - "Current OS: {{ ansible_facts.distribution | default('unknown') }} {{ ansible_facts.distribution_version | default('unknown') }}"
