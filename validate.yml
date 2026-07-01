@@ -1,0 +1,84 @@
+---
+- name: Validate RHEL upgrade
+  hosts: "{{ rhel_inventory_group | default(omit) }}"
+  strategy: free
+  become: true
+  gather_facts: false
+
+  vars:
+    validate_connection_timeout: 900
+    validate_connection_sleep: 15
+    validate_expected_targets:
+      "7": "8"
+      "8": "9"
+      "9": "10"
+
+  tasks:
+    - name: Wait for SSH to become available
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ validate_connection_timeout }}"
+        sleep: "{{ validate_connection_sleep }}"
+        delay: 10
+
+    - name: Gather facts after host is reachable
+      ansible.builtin.setup:
+
+    - name: Determine source RHEL major version
+      ansible.builtin.set_fact:
+        validate_source_major_version: >-
+          {{
+            source_rhel_major_version
+            | default(ansible_facts.get('source_rhel_major_version', omit))
+            | default(pre_upgrade_rhel_major_version | default('unknown'))
+          }}
+
+    - name: Determine expected target RHEL major version
+      ansible.builtin.set_fact:
+        validate_expected_target_major_version: >-
+          {{
+            target_rhel_major_version
+            | default(validate_expected_targets[validate_source_major_version | string] | default('unknown'))
+          }}
+
+    - name: Determine actual RHEL major version
+      ansible.builtin.set_fact:
+        validate_actual_major_version: "{{ ansible_facts.distribution_major_version | string }}"
+        validate_actual_distribution: "{{ ansible_facts.distribution }}"
+        validate_actual_distribution_version: "{{ ansible_facts.distribution_version }}"
+
+    - name: Show detected upgrade validation facts
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Detected distribution: {{ validate_actual_distribution }} {{ validate_actual_distribution_version }}"
+          - "Source RHEL major version: {{ validate_source_major_version }}"
+          - "Expected target RHEL major version: {{ validate_expected_target_major_version }}"
+          - "Actual target RHEL major version: {{ validate_actual_major_version }}"
+
+    - name: Validate host is running Red Hat Enterprise Linux
+      ansible.builtin.assert:
+        that:
+          - validate_actual_distribution == "RedHat"
+        fail_msg: >-
+          Upgrade validation failed. Expected Red Hat Enterprise Linux,
+          but detected {{ validate_actual_distribution }}.
+
+    - name: Validate expected upgrade target version
+      ansible.builtin.assert:
+        that:
+          - validate_expected_target_major_version != "unknown"
+          - validate_actual_major_version == validate_expected_target_major_version
+        fail_msg: >-
+          Upgrade validation failed for {{ inventory_hostname }}.
+          Expected RHEL {{ validate_expected_target_major_version }},
+          but detected RHEL {{ validate_actual_major_version }}
+          / {{ validate_actual_distribution_version }}.
+        success_msg: >-
+          Upgrade validation successful for {{ inventory_hostname }}.
+          Expected RHEL {{ validate_expected_target_major_version }},
+          detected RHEL {{ validate_actual_major_version }}
+          / {{ validate_actual_distribution_version }}.
+
+    - name: Mark upgrade validation success
+      ansible.builtin.set_fact:
+        leapp_validation_success: true
