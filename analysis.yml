@@ -8,8 +8,6 @@
 
   vars:
     rhsm_activate: "{{ rhsm_activate | default(false) | bool }}"
-
-    # Optional RHSM/Satellite vars expected from secrets.yml or survey
     rhsm_username: "{{ rhsm_username | default('') }}"
     rhsm_password: "{{ rhsm_password | default('') }}"
     rhsm_activation: "{{ rhsm_activation | default('') }}"
@@ -27,20 +25,6 @@
           {{ inventory_hostname }} is not a supported RHEL 7, 8, or 9 host.
           Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
 
-    - name: Register yum/dnf repolist
-      ansible.builtin.shell: |
-        set -o pipefail
-        if command -v dnf >/dev/null 2>&1; then
-          dnf repolist
-        else
-          yum repolist
-        fi
-      args:
-        executable: /bin/bash
-      register: yum_repolist
-      changed_when: false
-      failed_when: false
-
     - name: Check RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_identity
@@ -48,7 +32,19 @@
       failed_when: false
       when: rhsm_activate
 
-    - name: Validate RHSM activation variables
+    - name: Show RHSM registration status
+      ansible.builtin.debug:
+        msg: >-
+          RHSM activation requested for {{ inventory_hostname }}.
+          Current registration status:
+          {% if rhsm_identity.rc == 0 %}
+          REGISTERED.
+          {% else %}
+          NOT REGISTERED.
+          {% endif %}
+      when: rhsm_activate
+
+    - name: Validate RHSM/Satellite credential variables
       ansible.builtin.assert:
         that:
           - >
@@ -62,8 +58,12 @@
               rhsm_password | length > 0
             )
         fail_msg: >-
-          rhsm_activate is true, but required RHSM/Satellite credentials are missing.
-          Provide either rhsm_activation + rhsm_org, or rhsm_username + rhsm_password.
+          rhsm_activate is true, but the RHEL Satellite Credential is incomplete.
+          Provide either:
+          rhsm_activation + rhsm_org
+          or
+          rhsm_username + rhsm_password.
+          Optional: rhsm_server_url and rhsm_auto_attach.
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
@@ -74,6 +74,7 @@
         activationkey: "{{ rhsm_activation }}"
         org_id: "{{ rhsm_org }}"
         server_hostname: "{{ rhsm_server_url | default(omit, true) }}"
+        auto_attach: "{{ rhsm_auto_attach }}"
       register: rhsm_activation_result
       no_log: true
       when:
@@ -82,13 +83,13 @@
         - rhsm_activation | length > 0
         - rhsm_org | length > 0
 
-    - name: Register host using RHSM username and password
+    - name: Register host using RHSM/Satellite username and password
       community.general.redhat_subscription:
         state: present
         username: "{{ rhsm_username }}"
         password: "{{ rhsm_password }}"
-        auto_attach: "{{ rhsm_auto_attach }}"
         server_hostname: "{{ rhsm_server_url | default(omit, true) }}"
+        auto_attach: "{{ rhsm_auto_attach }}"
       register: rhsm_userpass_result
       no_log: true
       when:
@@ -98,9 +99,10 @@
         - rhsm_username | length > 0
         - rhsm_password | length > 0
 
-    - name: Refresh repo metadata after RHSM activation
+    - name: Refresh subscription and repository metadata after registration
       ansible.builtin.shell: |
         subscription-manager refresh || true
+
         if command -v dnf >/dev/null 2>&1; then
           dnf clean all
           dnf makecache
@@ -114,6 +116,20 @@
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
+
+    - name: Register yum/dnf repolist
+      ansible.builtin.shell: |
+        set -o pipefail
+        if command -v dnf >/dev/null 2>&1; then
+          dnf repolist
+        else
+          yum repolist
+        fi
+      args:
+        executable: /bin/bash
+      register: yum_repolist
+      changed_when: false
+      failed_when: false
 
     - name: Detect AWS RHUI marketplace host
       ansible.builtin.set_fact:
@@ -286,6 +302,8 @@
                 virtualization_role: "{{ ansible_virtualization_role | default('unknown') }}"
                 system_vendor: "{{ ansible_system_vendor | default('unknown') }}"
                 product_name: "{{ ansible_product_name | default('unknown') }}"
+                rhsm_activate: "{{ rhsm_activate }}"
+                rhsm_server_url: "{{ rhsm_server_url | default('') }}"
                 rhui_host: "{{ analysis_is_aws_rhui | default(false) }}"
                 pet_app_env: "{{ ['Dev','Test','Prod'] | random(seed=ansible_facts.hostname) }}"
                 pet_app_team: "{{ ['Bird','Cat','Dog','Fish','Hamster','Lizard','Snake'] | random(seed=ansible_facts.hostname) }}"
