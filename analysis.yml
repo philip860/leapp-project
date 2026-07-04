@@ -28,12 +28,19 @@
           {{ inventory_hostname }} is not a supported RHEL 7, 8, or 9 host.
           Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
 
+    - name: Report RHSM registration disabled
+      ansible.builtin.debug:
+        msg: >-
+          RHSM registration is disabled for {{ inventory_hostname }}.
+          Skipping RHSM/Satellite registration and continuing analysis.
+      when: not rhsm_activate | bool
+
     - name: Check RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_identity
       changed_when: false
       failed_when: false
-      when: rhsm_activate
+      when: rhsm_activate | bool
 
     - name: Show RHSM registration status
       ansible.builtin.debug:
@@ -45,7 +52,7 @@
           {% else %}
           NOT REGISTERED.
           {% endif %}
-      when: rhsm_activate
+      when: rhsm_activate | bool
 
     - name: Validate RHSM/Satellite credential variables
       ansible.builtin.assert:
@@ -69,7 +76,7 @@
           OR:
           rhsm_username + rhsm_password
       when:
-        - rhsm_activate
+        - rhsm_activate | bool
         - rhsm_identity.rc != 0
 
     - name: Register host using RHSM/Satellite activation key
@@ -83,7 +90,7 @@
       failed_when: false
       no_log: true
       when:
-        - rhsm_activate
+        - rhsm_activate | bool
         - rhsm_identity.rc != 0
         - rhsm_activation_key | length > 0
         - rhsm_org | length > 0
@@ -99,7 +106,7 @@
       failed_when: false
       no_log: true
       when:
-        - rhsm_activate
+        - rhsm_activate | bool
         - rhsm_identity.rc != 0
         - rhsm_username | length > 0
         - rhsm_password | length > 0
@@ -113,7 +120,7 @@
       register: rhsm_final_check
       changed_when: false
       failed_when: false
-      when: rhsm_activate
+      when: rhsm_activate | bool
 
     - name: Fail when all RHSM registration methods failed
       ansible.builtin.fail:
@@ -128,7 +135,7 @@
           - rhsm_username/password
           - rhsm_server_url
       when:
-        - rhsm_activate
+        - rhsm_activate | bool
         - rhsm_final_check.rc != 0
 
     - name: Refresh subscription and repository metadata after registration
@@ -146,7 +153,7 @@
         executable: /bin/bash
       changed_when: true
       when:
-        - rhsm_activate
+        - rhsm_activate | bool
         - rhsm_identity.rc != 0
         - rhsm_final_check.rc == 0
 
@@ -266,7 +273,18 @@
         msg: >-
           Missing Leapp package on {{ inventory_hostname }}.
           Leapp was not found and could not be installed.
-          Check enabled repositories, RHSM/Satellite registration, or RHUI access.
+
+          RHSM registration enabled: {{ rhsm_activate }}.
+
+          {% if rhsm_activate | bool %}
+          Check RHSM/Satellite registration, enabled repositories, or rhsm_server_url.
+          {% elif analysis_is_aws_rhui | default(false) | bool %}
+          RHSM registration is disabled and this appears to be an AWS RHUI host.
+          Check RHUI repositories and package availability.
+          {% else %}
+          RHSM registration is disabled.
+          Enable RHSM/Satellite registration or ensure Leapp repositories are already available.
+          {% endif %}
       when:
         - leapp_command_check.rc != 0
         - leapp_command_recheck.rc | default(1) != 0
