@@ -8,13 +8,21 @@
 
   vars:
     rhsm_activate: "{{ rhsm_activate | default(false) | bool }}"
+
+    # Username/password RHSM registration
     rhsm_username: "{{ rhsm_username | default('') }}"
     rhsm_password: "{{ rhsm_password | default('') }}"
-    rhsm_activation: "{{ rhsm_activation | default('') }}"
-    rhsm_org: "{{ rhsm_org | default('') }}"
-    rhsm_server_url: "{{ rhsm_server_url | default('') }}"
-    rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) | bool }}"
 
+    # Activation key RHSM/Satellite registration
+    rhsm_activation_key: "{{ rhsm_activation_key | default('') }}"
+    rhsm_org: "{{ rhsm_org | default('') }}"
+
+    # Blank = Red Hat hosted RHSM (console.redhat.com)
+    # Set only for Satellite
+    rhsm_server_url: "{{ rhsm_server_url | default('') }}"
+
+    rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) | bool }}"
+ 
   pre_tasks:
     - name: Validate supported RHEL major version
       ansible.builtin.assert:
@@ -25,12 +33,22 @@
           {{ inventory_hostname }} is not a supported RHEL 7, 8, or 9 host.
           Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
 
+    #Delete 
+    - name: Display RHSM activation disabled message
+      ansible.builtin.debug:
+        msg: >-
+          RHSM activation has been disabled for {{ inventory_hostname }}.
+          Workflow instructed not to attempt RHSM/Satellite registration.
+      when:
+        - not rhsm_activate
+
     - name: Check RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_identity
       changed_when: false
       failed_when: false
-      when: rhsm_activate
+      when:
+        - rhsm_activate
 
     - name: Show RHSM registration status
       ansible.builtin.debug:
@@ -42,14 +60,15 @@
           {% else %}
           NOT REGISTERED.
           {% endif %}
-      when: rhsm_activate
+      when:
+        - rhsm_activate
 
     - name: Validate RHSM/Satellite credential variables
       ansible.builtin.assert:
         that:
           - >
             (
-              rhsm_activation | length > 0 and
+              rhsm_activation_key | length > 0 and
               rhsm_org | length > 0
             )
             or
@@ -58,30 +77,43 @@
               rhsm_password | length > 0
             )
         fail_msg: >-
-          rhsm_activate is true, but the RHEL Satellite Credential is incomplete.
+          rhsm_activate=true but credentials are incomplete.
+
           Provide either:
-          rhsm_activation + rhsm_org
-          or
-          rhsm_username + rhsm_password.
-          Optional: rhsm_server_url and rhsm_auto_attach.
+          rhsm_activation_key + rhsm_org
+
+          OR:
+          rhsm_username + rhsm_password
+
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
 
+
+    #
+    # Try activation key first
+    #
+
     - name: Register host using RHSM/Satellite activation key
       community.general.redhat_subscription:
         state: present
-        activationkey: "{{ rhsm_activation }}"
+        activationkey: "{{ rhsm_activation_key }}"
         org_id: "{{ rhsm_org }}"
         server_hostname: "{{ rhsm_server_url | default(omit, true) }}"
         auto_attach: "{{ rhsm_auto_attach }}"
       register: rhsm_activation_result
+      failed_when: false
       no_log: true
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
-        - rhsm_activation | length > 0
+        - rhsm_activation_key | length > 0
         - rhsm_org | length > 0
+
+
+    #
+    # Fallback username/password
+    #
 
     - name: Register host using RHSM/Satellite username and password
       community.general.redhat_subscription:
@@ -91,13 +123,45 @@
         server_hostname: "{{ rhsm_server_url | default(omit, true) }}"
         auto_attach: "{{ rhsm_auto_attach }}"
       register: rhsm_userpass_result
+      failed_when: false
       no_log: true
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
-        - rhsm_activation | length == 0
         - rhsm_username | length > 0
         - rhsm_password | length > 0
+        - >
+          rhsm_activation_result is not defined
+          or
+          rhsm_activation_result.failed
+
+
+    - name: Verify final RHSM registration status
+      ansible.builtin.command: subscription-manager identity
+      register: rhsm_final_check
+      changed_when: false
+      failed_when: false
+      when:
+        - rhsm_activate
+
+
+    - name: Fail when all RHSM registration methods failed
+      ansible.builtin.fail:
+        msg: >-
+          RHSM registration failed on {{ inventory_hostname }}.
+
+          Attempted available authentication methods.
+
+          Verify:
+          - rhsm_activation_key
+          - rhsm_org
+          - rhsm_username/password
+          - rhsm_server_url
+
+      when:
+        - rhsm_activate
+        - rhsm_final_check.rc != 0
+
 
     - name: Refresh subscription and repository metadata after registration
       ansible.builtin.shell: |
@@ -116,6 +180,10 @@
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
+        - rhsm_final_check.rc == 0
+
+
+#Delete
 
     - name: Register yum/dnf repolist
       ansible.builtin.shell: |
