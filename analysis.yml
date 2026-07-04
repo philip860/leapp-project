@@ -30,6 +30,13 @@
           {{ inventory_hostname }} is not a supported RHEL 7, 8, or 9 host.
           Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
 
+    - name: Report RHSM registration disabled
+      ansible.builtin.debug:
+        msg: >-
+          RHSM registration is disabled for {{ inventory_hostname }}.
+          Skipping RHSM/Satellite registration and continuing analysis.
+      when: not rhsm_activate_requested | bool
+
     - name: Check RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_identity
@@ -37,13 +44,33 @@
       failed_when: false
       when: rhsm_activate_requested | bool
 
-    - name: Validate RHSM credentials when registration is needed
+    - name: Show RHSM registration status
+      ansible.builtin.debug:
+        msg: >-
+          RHSM activation requested for {{ inventory_hostname }}.
+          Current registration status:
+          {% if rhsm_identity.rc == 0 %}
+          REGISTERED.
+          {% else %}
+          NOT REGISTERED.
+          {% endif %}
+      when:
+        - rhsm_activate_requested | bool
+        - rhsm_identity is defined
+
+    - name: Validate RHSM/Satellite credential variables
       ansible.builtin.assert:
         that:
           - >
-            (rhsm_activation_key | length > 0 and rhsm_org | length > 0)
+            (
+              rhsm_activation_key | length > 0 and
+              rhsm_org | length > 0
+            )
             or
-            (rhsm_username | length > 0 and rhsm_password | length > 0)
+            (
+              rhsm_username | length > 0 and
+              rhsm_password | length > 0
+            )
         fail_msg: >-
           rhsm_activate=true but credentials are incomplete.
 
@@ -54,29 +81,41 @@
           - rhsm_username + rhsm_password
       when:
         - rhsm_activate_requested | bool
+        - rhsm_identity is defined
         - rhsm_identity.rc != 0
 
-    - name: Unregister stale broken RHSM state before registration
+    - name: Clean stale RHSM state before registration
       ansible.builtin.command: subscription-manager clean
       changed_when: true
       failed_when: false
       when:
         - rhsm_activate_requested | bool
+        - rhsm_identity is defined
         - rhsm_identity.rc != 0
 
-    - name: Register host using activation key
-      community.general.redhat_subscription:
-        state: present
-        activationkey: "{{ rhsm_activation_key }}"
-        org_id: "{{ rhsm_org }}"
-        server_hostname: "{{ rhsm_server_url if rhsm_server_url | length > 0 else omit }}"
-        auto_attach: "{{ rhsm_auto_attach_requested }}"
-        force_register: true
-      register: rhsm_activation_result
+    - name: Configure RHSM server URL for Satellite when provided
+      ansible.builtin.command: subscription-manager config --server.hostname={{ rhsm_server_url }}
+      changed_when: true
       failed_when: false
-      no_log: false
       when:
         - rhsm_activate_requested | bool
+        - rhsm_identity is defined
+        - rhsm_identity.rc != 0
+        - rhsm_server_url | length > 0
+
+    - name: Register host using activation key and org
+      ansible.builtin.command: >
+        subscription-manager register
+        --org={{ rhsm_org }}
+        --activationkey={{ rhsm_activation_key }}
+        --force
+      register: rhsm_activation_result
+      changed_when: rhsm_activation_result.rc == 0
+      failed_when: false
+      no_log: true
+      when:
+        - rhsm_activate_requested | bool
+        - rhsm_identity is defined
         - rhsm_identity.rc != 0
         - rhsm_activation_key | length > 0
         - rhsm_org | length > 0
@@ -88,25 +127,38 @@
       failed_when: false
       when:
         - rhsm_activate_requested | bool
+        - rhsm_identity is defined
         - rhsm_identity.rc != 0
 
-    - name: Register host using username/password fallback
-      community.general.redhat_subscription:
-        state: present
-        username: "{{ rhsm_username }}"
-        password: "{{ rhsm_password }}"
-        server_hostname: "{{ rhsm_server_url if rhsm_server_url | length > 0 else omit }}"
-        auto_attach: "{{ rhsm_auto_attach_requested }}"
-        force_register: true
+    - name: Register host using username and password
+      ansible.builtin.command: >
+        subscription-manager register
+        --username={{ rhsm_username }}
+        --password={{ rhsm_password }}
+        --force
       register: rhsm_userpass_result
+      changed_when: rhsm_userpass_result.rc == 0
       failed_when: false
       no_log: true
       when:
         - rhsm_activate_requested | bool
+        - rhsm_identity is defined
         - rhsm_identity.rc != 0
         - rhsm_after_activation_key.rc | default(1) != 0
         - rhsm_username | length > 0
         - rhsm_password | length > 0
+
+    - name: Auto-attach subscription when username/password registration is used
+      ansible.builtin.command: subscription-manager attach --auto
+      register: rhsm_auto_attach_result
+      changed_when: rhsm_auto_attach_result.rc == 0
+      failed_when: false
+      no_log: true
+      when:
+        - rhsm_activate_requested | bool
+        - rhsm_auto_attach_requested | bool
+        - rhsm_userpass_result is defined
+        - rhsm_userpass_result.rc | default(1) == 0
 
     - name: Verify final RHSM registration status
       ansible.builtin.command: subscription-manager identity
@@ -132,14 +184,16 @@
         msg: >-
           RHSM registration failed on {{ inventory_hostname }}.
 
-          Most likely causes:
-          - activation key does not exist or is not enabled
-          - rhsm_org is wrong
-          - rhsm_server_url is wrong for Satellite
-          - Red Hat hosted RHSM should usually leave rhsm_server_url blank
-          - username/password fallback was not provided
+          Verify:
+          - rhsm_activation_key
+          - rhsm_org
+          - rhsm_username/password
+          - rhsm_server_url only if using Satellite
+
+          For Red Hat hosted RHSM, leave rhsm_server_url blank.
       when:
         - rhsm_activate_requested | bool
+        - rhsm_final_check is defined
         - rhsm_final_check.rc | default(1) != 0
 
     - name: Refresh subscription and repository metadata after registration
@@ -158,6 +212,7 @@
       changed_when: true
       when:
         - rhsm_activate_requested | bool
+        - rhsm_final_check is defined
         - rhsm_final_check.rc == 0
 
     - name: Register yum/dnf repolist
@@ -276,6 +331,18 @@
         msg: >-
           Missing Leapp package on {{ inventory_hostname }}.
           Leapp was not found and could not be installed.
+
+          RHSM registration enabled: {{ rhsm_activate_requested }}.
+
+          {% if rhsm_activate_requested | bool %}
+          Check RHSM/Satellite registration, enabled repositories, or rhsm_server_url.
+          {% elif analysis_is_aws_rhui | default(false) | bool %}
+          RHSM registration is disabled and this appears to be an AWS RHUI host.
+          Check RHUI repositories and package availability.
+          {% else %}
+          RHSM registration is disabled.
+          Enable RHSM/Satellite registration or ensure Leapp repositories are already available.
+          {% endif %}
       when:
         - leapp_command_check.rc != 0
         - leapp_command_recheck.rc | default(1) != 0
