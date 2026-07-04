@@ -9,20 +9,15 @@
   vars:
     rhsm_activate: "{{ rhsm_activate | default(false) | bool }}"
 
-    # Username/password RHSM registration
     rhsm_username: "{{ rhsm_username | default('') }}"
     rhsm_password: "{{ rhsm_password | default('') }}"
 
-    # Activation key RHSM/Satellite registration
     rhsm_activation_key: "{{ rhsm_activation_key | default('') }}"
     rhsm_org: "{{ rhsm_org | default('') }}"
 
-    # Blank = Red Hat hosted RHSM (console.redhat.com)
-    # Set only for Satellite
     rhsm_server_url: "{{ rhsm_server_url | default('') }}"
-
     rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) | bool }}"
- 
+
   pre_tasks:
     - name: Validate supported RHEL major version
       ansible.builtin.assert:
@@ -33,22 +28,12 @@
           {{ inventory_hostname }} is not a supported RHEL 7, 8, or 9 host.
           Detected: {{ ansible_distribution }} {{ ansible_distribution_version }}
 
-    #Delete 
-    - name: Display RHSM activation disabled message
-      ansible.builtin.debug:
-        msg: >-
-          RHSM activation has been disabled for {{ inventory_hostname }}.
-          Workflow instructed not to attempt RHSM/Satellite registration.
-      when:
-        - not rhsm_activate
-
     - name: Check RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_identity
       changed_when: false
       failed_when: false
-      when:
-        - rhsm_activate
+      when: rhsm_activate
 
     - name: Show RHSM registration status
       ansible.builtin.debug:
@@ -60,8 +45,7 @@
           {% else %}
           NOT REGISTERED.
           {% endif %}
-      when:
-        - rhsm_activate
+      when: rhsm_activate
 
     - name: Validate RHSM/Satellite credential variables
       ansible.builtin.assert:
@@ -84,15 +68,9 @@
 
           OR:
           rhsm_username + rhsm_password
-
       when:
         - rhsm_activate
         - rhsm_identity.rc != 0
-
-
-    #
-    # Try activation key first
-    #
 
     - name: Register host using RHSM/Satellite activation key
       community.general.redhat_subscription:
@@ -109,11 +87,6 @@
         - rhsm_identity.rc != 0
         - rhsm_activation_key | length > 0
         - rhsm_org | length > 0
-
-
-    #
-    # Fallback username/password
-    #
 
     - name: Register host using RHSM/Satellite username and password
       community.general.redhat_subscription:
@@ -133,17 +106,14 @@
         - >
           rhsm_activation_result is not defined
           or
-          rhsm_activation_result.failed
-
+          rhsm_activation_result.failed | default(false)
 
     - name: Verify final RHSM registration status
       ansible.builtin.command: subscription-manager identity
       register: rhsm_final_check
       changed_when: false
       failed_when: false
-      when:
-        - rhsm_activate
-
+      when: rhsm_activate
 
     - name: Fail when all RHSM registration methods failed
       ansible.builtin.fail:
@@ -157,11 +127,9 @@
           - rhsm_org
           - rhsm_username/password
           - rhsm_server_url
-
       when:
         - rhsm_activate
         - rhsm_final_check.rc != 0
-
 
     - name: Refresh subscription and repository metadata after registration
       ansible.builtin.shell: |
@@ -182,12 +150,10 @@
         - rhsm_identity.rc != 0
         - rhsm_final_check.rc == 0
 
-
-#Delete
-
     - name: Register yum/dnf repolist
       ansible.builtin.shell: |
         set -o pipefail
+
         if command -v dnf >/dev/null 2>&1; then
           dnf repolist
         else
@@ -204,17 +170,19 @@
         analysis_is_aws_rhui: >-
           {{
             (
-              ansible_system_vendor in ["Amazon EC2", "Xen"]
+              ansible_system_vendor | default('') in ['Amazon EC2', 'Xen']
               or
               ansible_product_uuid | default('') | regex_search('^(ec2|EC2)')
             )
             and
-            ('rhui' in yum_repolist.stdout | default(''))
+            (
+              'rhui' in (yum_repolist.stdout | default('') | lower)
+            )
           }}
 
     - name: Set RHUI RHEL 7 extras repo
       ansible.builtin.set_fact:
-        analysis_repos_el7: "rhel-7-server-rhui-extras-rpms"
+        analysis_repos_el7: rhel-7-server-rhui-extras-rpms
       when:
         - analysis_is_aws_rhui | bool
         - ansible_distribution_major_version | int == 7
@@ -281,8 +249,8 @@
           }}
         state: present
       register: leapp_install_result
-      when: leapp_command_check.rc != 0
       failed_when: false
+      when: leapp_command_check.rc != 0
 
     - name: Re-check if leapp command exists after install
       ansible.builtin.shell: command -v leapp
@@ -327,8 +295,8 @@
     - name: Confirm check_vdo True in Leapp answerfile
       ansible.builtin.replace:
         path: /var/log/leapp/answerfile
-        regexp: '(\[check_vdo\][^<]*)\#\ confirm\ \='
-        replace: '\1confirm\ \=\ True'
+        regexp: '(\[check_vdo\][\s\S]*?)# confirm ='
+        replace: '\1confirm = True'
       when: leapp_answerfile.stat.exists
 
     - name: Get report file status
@@ -339,6 +307,8 @@
     - name: Log preupgrade report
       when:
         - report_file.stat.exists
+        - splunk_url is defined
+        - splunk_index is defined
         - splunk_hectoken is defined
       block:
         - name: Gather EC2 metadata facts when running on EC2
@@ -373,8 +343,8 @@
                 rhsm_activate: "{{ rhsm_activate }}"
                 rhsm_server_url: "{{ rhsm_server_url | default('') }}"
                 rhui_host: "{{ analysis_is_aws_rhui | default(false) }}"
-                pet_app_env: "{{ ['Dev','Test','Prod'] | random(seed=ansible_facts.hostname) }}"
-                pet_app_team: "{{ ['Bird','Cat','Dog','Fish','Hamster','Lizard','Snake'] | random(seed=ansible_facts.hostname) }}"
+                pet_app_env: "{{ ['Dev', 'Test', 'Prod'] | random(seed=ansible_facts.hostname) }}"
+                pet_app_team: "{{ ['Bird', 'Cat', 'Dog', 'Fish', 'Hamster', 'Lizard', 'Snake'] | random(seed=ansible_facts.hostname) }}"
                 region: "{{ ansible_ec2_placement_region | default('undefined') }}"
                 report: "{{ leapp_report.content | b64decode | from_json }}"
             body_format: json
@@ -389,4 +359,4 @@
         - name: Show Splunk send result
           ansible.builtin.debug:
             var: splunk_send
-          when: splunk_send | default(false)
+          when: splunk_send is defined
