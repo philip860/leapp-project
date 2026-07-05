@@ -4,5 +4,20 @@
   become: true
   gather_facts: true
 
+  vars:
+    skip_snapshot: "{{ skip_snapshot | default(false) | bool }}"
+
+    snapshot_action: "{{ snapshot_action | default('create') }}"
+    snapshot_set_name: "{{ snapshot_set_name | default('leapp-preupgrade') }}"
+    snapshot_provider: "{{ snapshot_provider | default('auto') }}"
+
+    snapshot_aws_enabled: "{{ snapshot_aws_enabled | default(true) | bool }}"
+    snapshot_lvm_enabled: "{{ snapshot_lvm_enabled | default(true) | bool }}"
+    snapshot_vmware_enabled: "{{ snapshot_vmware_enabled | default(false) | bool }}"
+    snapshot_kvm_enabled: "{{ snapshot_kvm_enabled | default(false) | bool }}"
+    snapshot_baremetal_enabled: "{{ snapshot_baremetal_enabled | default(false) | bool }}"
+
+    snapshot_fail_when_unsupported: "{{ snapshot_fail_when_unsupported | default(false) | bool }}"
+
   roles:
     - role: philip860.leapp_snapshot.snapshot_dispatcher
