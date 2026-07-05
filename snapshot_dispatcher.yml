@@ -1,0 +1,8 @@
+---
+- name: Dispatch snapshot workflow before Leapp upgrade
+  hosts: "{{ rhel_inventory_group | default(omit) }}"
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: philip860.leapp_snapshot.snapshot_dispatcher
