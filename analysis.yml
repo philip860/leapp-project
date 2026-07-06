@@ -15,8 +15,9 @@
     rhsm_server_url: "{{ rhsm_server_url | default('') | trim }}"
     rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) }}"
 
-    # Default only. Final value is normalized after RHUI detection.
-    leapp_upgrade_type: "{{ leapp_upgrade_type | default('cdn') }}"
+    # Do not define leapp_upgrade_type from itself.
+    # This avoids recursive templating errors.
+    leapp_upgrade_type_input: "{{ leapp_upgrade_type | default('cdn', true) }}"
 
   pre_tasks:
     - name: Normalize RHSM flags
@@ -24,12 +25,12 @@
         rhsm_activate_requested: "{{ rhsm_activate | string | lower in ['true', 'yes', '1', 'on'] }}"
         rhsm_auto_attach_requested: "{{ rhsm_auto_attach | string | lower in ['true', 'yes', '1', 'on'] }}"
 
-    - name: Normalize inbound Leapp upgrade type
+    - name: Initialize Leapp upgrade type
       ansible.builtin.set_fact:
         leapp_upgrade_type: >-
           {{
             'rhui'
-            if (leapp_upgrade_type | default('cdn') | string | lower) in ['rhui', 'rhuirhui']
+            if (leapp_upgrade_type_input | string | lower | trim) in ['rhui', 'rhuirhui']
             else 'cdn'
           }}
 
