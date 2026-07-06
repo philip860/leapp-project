@@ -41,9 +41,32 @@
   register: rhel9_ifcfg_files
   when: leapp_utility_check.stat.exists
 
-- name: Migrate legacy ifcfg network configuration to NetworkManager keyfile format
-  ansible.builtin.command: "nmcli connection migrate {{ item.path }}"
+- name: Create backup directory for ifcfg files
+  ansible.builtin.file:
+    path: /root/leapp-ifcfg-backup
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_files.matched | default(0) | int > 0
+
+- name: Backup legacy ifcfg network configuration files
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "/root/leapp-ifcfg-backup/{{ item.path | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
   loop: "{{ rhel9_ifcfg_files.files | default([]) }}"
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_files.matched | default(0) | int > 0
+
+- name: Migrate all NetworkManager ifcfg connections to keyfile format
+  ansible.builtin.command: nmcli connection migrate
   register: rhel9_nmcli_migrate
   changed_when: rhel9_nmcli_migrate.rc == 0
   failed_when: false
@@ -51,13 +74,30 @@
     - leapp_utility_check.stat.exists
     - rhel9_ifcfg_files.matched | default(0) | int > 0
 
-- name: Reload NetworkManager connections
+- name: Reload NetworkManager after keyfile migration
   ansible.builtin.command: nmcli connection reload
   changed_when: false
   failed_when: false
   when:
     - leapp_utility_check.stat.exists
     - rhel9_ifcfg_files.matched | default(0) | int > 0
+
+- name: Recheck legacy ifcfg files after migration
+  ansible.builtin.find:
+    paths: /etc/sysconfig/network-scripts
+    patterns: "ifcfg-*"
+    file_type: file
+  register: rhel9_ifcfg_after_migration
+  when: leapp_utility_check.stat.exists
+
+- name: Remove remaining legacy ifcfg files after backup and migration
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ rhel9_ifcfg_after_migration.files | default([]) }}"
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_after_migration.matched | default(0) | int > 0
 
 - name: Check current kernel command line
   ansible.builtin.command: cat /proc/cmdline
@@ -70,18 +110,14 @@
   register: rhel9_remove_nvme_mpath_disable
   changed_when: rhel9_remove_nvme_mpath_disable.rc == 0
   failed_when: false
-  when:
-    - leapp_utility_check.stat.exists
-    - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
+  when: leapp_utility_check.stat.exists
 
 - name: Enable NVMe native multipath in GRUB
   ansible.builtin.command: grubby --update-kernel=ALL --args="nvme_core.multipath=Y"
   register: rhel9_enable_nvme_mpath
   changed_when: rhel9_enable_nvme_mpath.rc == 0
   failed_when: false
-  when:
-    - leapp_utility_check.stat.exists
-    - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
+  when: leapp_utility_check.stat.exists
 
 - name: Set NVMe reboot required fact
   ansible.builtin.set_fact:
@@ -126,39 +162,11 @@
     msg: >-
       Loaded kernel modules detected that may block or risk RHEL 9 to 10 upgrade:
       {{ rhel9_loaded_removed_modules.stdout_lines }}.
-      qla4xxx is a RHEL 10 removed-driver inhibitor and will be blacklisted,
-      removed from initramfs, and unloaded when possible.
+      qla4xxx will be unloaded with modprobe -r, blacklisted, removed from initramfs,
+      and verified after reboot.
   when:
     - leapp_utility_check.stat.exists
     - rhel9_loaded_removed_modules.stdout | length > 0
-
-- name: Blacklist qla4xxx kernel module
-  ansible.builtin.copy:
-    dest: /etc/modprobe.d/blacklist-qla4xxx.conf
-    owner: root
-    group: root
-    mode: "0644"
-    content: |
-      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
-      # qla4xxx is removed in RHEL 10 and causes a Leapp inhibitor.
-      blacklist qla4xxx
-      install qla4xxx /bin/false
-  when:
-    - leapp_utility_check.stat.exists
-    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
-
-- name: Exclude qla4xxx from initramfs
-  ansible.builtin.copy:
-    dest: /etc/dracut.conf.d/omit-qla4xxx.conf
-    owner: root
-    group: root
-    mode: "0644"
-    content: |
-      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
-      omit_drivers+=" qla4xxx "
-  when:
-    - leapp_utility_check.stat.exists
-    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
 
 - name: Attempt to unload qla4xxx module
   ansible.builtin.command: modprobe -r qla4xxx
@@ -169,13 +177,34 @@
     - leapp_utility_check.stat.exists
     - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
 
+- name: Blacklist qla4xxx kernel module
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/blacklist-qla4xxx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
+      blacklist qla4xxx
+      install qla4xxx /bin/false
+  when: leapp_utility_check.stat.exists
+
+- name: Exclude qla4xxx from initramfs
+  ansible.builtin.copy:
+    dest: /etc/dracut.conf.d/omit-qla4xxx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
+      omit_drivers+=" qla4xxx "
+  when: leapp_utility_check.stat.exists
+
 - name: Rebuild initramfs after qla4xxx blacklist
   ansible.builtin.command: dracut -f --regenerate-all
   register: rhel9_dracut_qla4xxx
   changed_when: rhel9_dracut_qla4xxx.rc == 0
-  when:
-    - leapp_utility_check.stat.exists
-    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+  when: leapp_utility_check.stat.exists
 
 - name: Set qla4xxx reboot required fact
   ansible.builtin.set_fact:
@@ -222,7 +251,7 @@
     connect_timeout: 20
     reboot_timeout: 900
     pre_reboot_delay: 5
-    post_reboot_delay: 30
+    post_reboot_delay: 45
     test_command: whoami
   when:
     - leapp_utility_check.stat.exists
@@ -245,25 +274,28 @@
   changed_when: false
   when: leapp_utility_check.stat.exists
 
-- name: Fail if qla4xxx is still loaded after reboot
-  ansible.builtin.fail:
-    msg: >-
-      qla4xxx is still loaded after blacklist, initramfs rebuild, and reboot.
-      Leapp will likely continue to report this as a RHEL 10 removed-driver inhibitor.
-      Confirm whether qla4xxx is required by active hardware/storage and remove the dependency manually.
-  when:
-    - leapp_utility_check.stat.exists
-    - rhel9_qla4xxx_recheck.stdout | length > 0
-
-- name: Confirm qla4xxx is not loaded
-  ansible.builtin.debug:
-    msg: "qla4xxx is not loaded after remediation."
-
 - name: Recheck current kernel command line after reboot
   ansible.builtin.command: cat /proc/cmdline
   register: rhel9_cmdline_after_reboot
   changed_when: false
   when: leapp_utility_check.stat.exists
+
+- name: Recheck legacy ifcfg files after reboot
+  ansible.builtin.find:
+    paths: /etc/sysconfig/network-scripts
+    patterns: "ifcfg-*"
+    file_type: file
+  register: rhel9_ifcfg_after_reboot
+  when: leapp_utility_check.stat.exists
+
+- name: Fail if qla4xxx is still loaded after reboot
+  ansible.builtin.fail:
+    msg: >-
+      qla4xxx is still loaded after modprobe removal, blacklist, initramfs rebuild, and reboot.
+      Leapp will likely continue to report this as a RHEL 10 removed-driver inhibitor.
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_qla4xxx_recheck.stdout | length > 0
 
 - name: Fail if NVMe native multipath is still disabled after reboot
   ansible.builtin.fail:
@@ -274,9 +306,35 @@
     - leapp_utility_check.stat.exists
     - "'nvme_core.multipath=N' in rhel9_cmdline_after_reboot.stdout"
 
+- name: Fail if legacy ifcfg files still exist after migration
+  ansible.builtin.fail:
+    msg: >-
+      Legacy ifcfg files still exist after migration:
+      {{ rhel9_ifcfg_after_reboot.files | map(attribute='path') | list }}.
+      Leapp will continue to report the legacy network configuration inhibitor.
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_after_reboot.matched | default(0) | int > 0
+
+- name: Confirm qla4xxx is not loaded
+  ansible.builtin.debug:
+    msg: "qla4xxx is not loaded after remediation."
+  when: leapp_utility_check.stat.exists
+
+- name: Confirm NVMe native multipath is not disabled
+  ansible.builtin.debug:
+    msg: "nvme_core.multipath=N is not present after remediation."
+  when: leapp_utility_check.stat.exists
+
+- name: Confirm legacy ifcfg files are removed
+  ansible.builtin.debug:
+    msg: "Legacy ifcfg files are removed after NetworkManager keyfile migration."
+  when: leapp_utility_check.stat.exists
+
 - name: Final RHEL 9 remediation summary
   ansible.builtin.debug:
     msg: >-
-      RHEL 9 remediation completed successfully. qla4xxx is not loaded, required reboot
-      remediation has completed, and the host is reachable.
+      RHEL 9 remediation completed successfully. qla4xxx is not loaded,
+      nvme_core.multipath=N is removed, legacy ifcfg files are gone,
+      and the host is reachable.
 ...
