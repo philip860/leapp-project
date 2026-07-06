@@ -15,7 +15,7 @@
     rhsm_server_url: "{{ rhsm_server_url | default('') | trim }}"
     rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) }}"
 
-    # Default to CDN unless AWS RHUI is detected below.
+    # Default only. Final value is normalized after RHUI detection.
     leapp_upgrade_type: "{{ leapp_upgrade_type | default('cdn') }}"
 
   pre_tasks:
@@ -23,6 +23,15 @@
       ansible.builtin.set_fact:
         rhsm_activate_requested: "{{ rhsm_activate | string | lower in ['true', 'yes', '1', 'on'] }}"
         rhsm_auto_attach_requested: "{{ rhsm_auto_attach | string | lower in ['true', 'yes', '1', 'on'] }}"
+
+    - name: Normalize inbound Leapp upgrade type
+      ansible.builtin.set_fact:
+        leapp_upgrade_type: >-
+          {{
+            'rhui'
+            if (leapp_upgrade_type | default('cdn') | string | lower) in ['rhui', 'rhuirhui']
+            else 'cdn'
+          }}
 
     - name: Validate supported RHEL major version
       ansible.builtin.assert:
@@ -248,10 +257,9 @@
             )
           }}
 
-    - name: Set Leapp upgrade type to RHUI for AWS RHUI hosts
+    - name: Set final Leapp upgrade type
       ansible.builtin.set_fact:
-        leapp_upgrade_type: rhui
-      when: analysis_is_aws_rhui | bool
+        leapp_upgrade_type: "{{ 'rhui' if analysis_is_aws_rhui | bool else 'cdn' }}"
 
     - name: Show AWS RHUI detection status
       ansible.builtin.debug:
@@ -287,7 +295,6 @@
           - cockpit
           - cockpit-system
           - cockpit-leapp
-
         analysis_packages_el8:
           - leapp
           - leapp-upgrade-el8toel9
@@ -296,7 +303,6 @@
           - cockpit-system
           - cockpit-leapp
           - vdo
-
         analysis_packages_el9:
           - leapp
           - leapp-upgrade-el9toel10
@@ -313,7 +319,6 @@
           - cockpit
           - cockpit-system
           - cockpit-leapp
-
         analysis_packages_el8:
           - leapp
           - leapp-upgrade-el8toel9
@@ -321,7 +326,6 @@
           - cockpit-system
           - cockpit-leapp
           - vdo
-
         analysis_packages_el9:
           - leapp
           - leapp-upgrade-el9toel10
@@ -405,15 +409,6 @@
           NOT READY - leapp is unavailable.
           {% endif %}
 
-    #############################################################
-    # Prepare fresh Leapp analysis output
-    #
-    # This prevents stale leapp-report.json / leapp-report.txt files
-    # from being reused on reruns, especially on RHEL 9 hosts.
-    #
-    # Old reports are archived, not deleted.
-    #############################################################
-
     - name: Create Leapp previous report archive directory
       ansible.builtin.file:
         path: /var/log/leapp/previous-reports
@@ -461,6 +456,10 @@
     - infra.leapp.analysis
 
   post_tasks:
+    - name: Re-normalize Leapp upgrade type after analysis role
+      ansible.builtin.set_fact:
+        leapp_upgrade_type: "{{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
+
     - name: Verify new Leapp report was generated
       ansible.builtin.stat:
         path: /var/log/leapp/leapp-report.json
@@ -549,28 +548,15 @@
             msg: "Splunk event send attempted."
           when: splunk_send is defined
 
-    #############################################################
-    # Export workflow artifacts for downstream jobs
-    # Needed by:
-    #   - upgrade.yml
-    #
-    # Example:
-    #   AWS RHUI:
-    #       leapp_upgrade_type=rhui
-    #
-    #   RHSM/Satellite/CDN:
-    #       leapp_upgrade_type=cdn
-    #############################################################
-
     - name: Pass Leapp workflow variables downstream
       ansible.builtin.set_stats:
         data:
-          leapp_upgrade_type: "{{ leapp_upgrade_type }}"
+          leapp_upgrade_type: "{{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
           analysis_is_aws_rhui: "{{ analysis_is_aws_rhui | default(false) }}"
         per_host: false
 
     - name: Show exported workflow variables
       ansible.builtin.debug:
         msg:
-          - "Exported leapp_upgrade_type={{ leapp_upgrade_type }}"
+          - "Exported leapp_upgrade_type={{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
           - "Exported analysis_is_aws_rhui={{ analysis_is_aws_rhui | default(false) }}"
