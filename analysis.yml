@@ -549,15 +549,21 @@
             msg: "Splunk event send attempted."
           when: splunk_send is defined
 
+    - name: Normalize final Leapp workflow values
+      ansible.builtin.set_fact:
+        leapp_upgrade_type_final: "{{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
+        analysis_is_aws_rhui_final: "{{ analysis_is_aws_rhui | default(false) | bool }}"
+
     - name: Pass Leapp workflow variables downstream
       ansible.builtin.set_stats:
         data:
-          leapp_upgrade_type: "{{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
-          analysis_is_aws_rhui: "{{ analysis_is_aws_rhui | default(false) }}"
+          leapp_upgrade_type: "{{ leapp_upgrade_type_final }}"
+          analysis_is_aws_rhui: "{{ analysis_is_aws_rhui_final }}"
         per_host: false
+        aggregate: false
 
     - name: Show exported workflow variables
       ansible.builtin.debug:
         msg:
-          - "Exported leapp_upgrade_type={{ 'rhui' if analysis_is_aws_rhui | default(false) | bool else 'cdn' }}"
-          - "Exported analysis_is_aws_rhui={{ analysis_is_aws_rhui | default(false) }}"
+          - "Exported leapp_upgrade_type={{ leapp_upgrade_type_final }}"
+          - "Exported analysis_is_aws_rhui={{ analysis_is_aws_rhui_final }}"
