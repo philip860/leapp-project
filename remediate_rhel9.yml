@@ -32,4 +32,154 @@
   ansible.builtin.debug:
     msg: "Leapp is not installed on this RHEL 9 host. Skipping Leapp-specific remediation."
   when: not leapp_utility_check.stat.exists
+
+- name: Find legacy ifcfg network configuration files
+  ansible.builtin.find:
+    paths: /etc/sysconfig/network-scripts
+    patterns: "ifcfg-*"
+    file_type: file
+  register: rhel9_ifcfg_files
+  when: leapp_utility_check.stat.exists
+
+- name: Migrate legacy ifcfg network configuration to NetworkManager keyfile format
+  ansible.builtin.command: "nmcli connection migrate {{ item.path }}"
+  loop: "{{ rhel9_ifcfg_files.files | default([]) }}"
+  register: rhel9_nmcli_migrate
+  changed_when: rhel9_nmcli_migrate.rc == 0
+  failed_when: false
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_files.matched | default(0) | int > 0
+
+- name: Reload NetworkManager connections
+  ansible.builtin.command: nmcli connection reload
+  changed_when: false
+  failed_when: false
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_ifcfg_files.matched | default(0) | int > 0
+
+- name: Check current kernel command line
+  ansible.builtin.command: cat /proc/cmdline
+  register: rhel9_cmdline
+  changed_when: false
+  when: leapp_utility_check.stat.exists
+
+- name: Remove explicit NVMe multipath disablement from GRUB
+  ansible.builtin.command: grubby --update-kernel=ALL --remove-args="nvme_core.multipath=N"
+  register: rhel9_remove_nvme_mpath_disable
+  changed_when: rhel9_remove_nvme_mpath_disable.rc == 0
+  failed_when: false
+  when:
+    - leapp_utility_check.stat.exists
+    - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
+
+- name: Enable NVMe native multipath in GRUB
+  ansible.builtin.command: grubby --update-kernel=ALL --args="nvme_core.multipath=Y"
+  register: rhel9_enable_nvme_mpath
+  changed_when: rhel9_enable_nvme_mpath.rc == 0
+  failed_when: false
+  when:
+    - leapp_utility_check.stat.exists
+    - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
+
+- name: Warn that reboot is required for NVMe native multipath remediation
+  ansible.builtin.debug:
+    msg: >-
+      NVMe native multipath was enabled in GRUB. Reboot the host before rerunning
+      leapp preupgrade so /proc/cmdline no longer contains nvme_core.multipath=N.
+  when:
+    - leapp_utility_check.stat.exists
+    - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
+
+- name: Check for broken vdo.service systemd symlink
+  ansible.builtin.stat:
+    path: /etc/systemd/system/multi-user.target.wants/vdo.service
+  register: rhel9_vdo_symlink
+  when: leapp_utility_check.stat.exists
+
+- name: Remove broken vdo.service systemd symlink
+  ansible.builtin.file:
+    path: /etc/systemd/system/multi-user.target.wants/vdo.service
+    state: absent
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_vdo_symlink.stat.exists | default(false)
+
+- name: Reload systemd after removing broken symlink
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_vdo_symlink.stat.exists | default(false)
+
+- name: Check loaded kernel modules removed or unsupported in RHEL 10
+  ansible.builtin.shell: |
+    set -o pipefail
+    lsmod | awk '{print $1}' | grep -E '^(qla4xxx|bnx2i|cnic)$' || true
+  args:
+    executable: /bin/bash
+  register: rhel9_loaded_removed_modules
+  changed_when: false
+  when: leapp_utility_check.stat.exists
+
+- name: Warn about loaded RHEL 10 removed or unmaintained drivers
+  ansible.builtin.debug:
+    msg: >-
+      Loaded kernel modules detected that may block or risk RHEL 9 to 10 upgrade:
+      {{ rhel9_loaded_removed_modules.stdout_lines }}.
+      qla4xxx is a RHEL 10 removed-driver inhibitor. Do not unload automatically unless
+      you confirm the host is not using this driver for active storage/network access.
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_loaded_removed_modules.stdout | length > 0
+
+- name: Fail safely when qla4xxx is loaded
+  ansible.builtin.fail:
+    msg: >-
+      qla4xxx is currently loaded and Leapp reports it as removed in RHEL 10.
+      This playbook will not automatically unload it because it may be tied to storage access.
+      Confirm the system does not require this driver, remove the dependency, rebuild initramfs
+      if needed, reboot, and rerun Leapp preupgrade.
+  when:
+    - leapp_utility_check.stat.exists
+    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+
+- name: Check for libdb packages
+  ansible.builtin.package_facts:
+    manager: auto
+  when: leapp_utility_check.stat.exists
+
+- name: Warn when Berkeley DB packages are installed
+  ansible.builtin.debug:
+    msg: >-
+      Berkeley DB/libdb packages are installed. RHEL 10 does not include libdb.
+      Review applications depending on libdb and migrate their data before upgrade.
+  when:
+    - leapp_utility_check.stat.exists
+    - "'libdb' in ansible_facts.packages or 'libdb-utils' in ansible_facts.packages"
+
+- name: Check XFS filesystems and bigtime support
+  ansible.builtin.command: xfs_info /
+  register: rhel9_xfs_root_info
+  changed_when: false
+  failed_when: false
+  when: leapp_utility_check.stat.exists
+
+- name: Warn when root XFS filesystem does not show bigtime enabled
+  ansible.builtin.debug:
+    msg: >-
+      Root filesystem appears to be XFS without bigtime enabled. Leapp reports this as low risk.
+      Do not run xfs_admin -O bigtime=1 against a mounted root filesystem. Schedule offline
+      maintenance if you want to enable it.
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_xfs_root_info.rc == 0
+    - "'bigtime=1' not in rhel9_xfs_root_info.stdout"
+
+- name: Final RHEL 9 remediation summary
+  ansible.builtin.debug:
+    msg: >-
+      RHEL 9 remediation completed. If NVMe multipath settings changed, reboot before rerunning
+      leapp preupgrade. If qla4xxx was detected, manual remediation is required before upgrade.
 ...
