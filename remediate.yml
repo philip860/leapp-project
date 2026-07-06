@@ -5,20 +5,27 @@
   gather_facts: true
   become: true
   force_handlers: true
+
   tasks:
-    - name: "Remediate rhel7 systems"
-      when: ansible_distribution_major_version|int == 7
+    - name: Remediate rhel7 systems
+      when: ansible_distribution_major_version | int == 7
       ansible.builtin.import_tasks: remediate_rhel7.yml
-    - name: "Remediate rhel8 systems"
-      when: ansible_distribution_major_version|int == 8
+
+    - name: Remediate rhel8 systems
+      when: ansible_distribution_major_version | int == 8
       ansible.builtin.import_tasks: remediate_rhel8.yml
 
+    - name: Remediate rhel9 systems
+      when: ansible_distribution_major_version | int == 9
+      ansible.builtin.import_tasks: remediate_rhel9.yml
+
   handlers:
-    - name: "Restart sshd"
+    - name: Restart sshd
       ansible.builtin.service:
         name: sshd
         state: restarted
-    - name: "Restart firewalld"
+
+    - name: Restart firewalld
       ansible.builtin.service:
         name: firewalld
         state: restarted
