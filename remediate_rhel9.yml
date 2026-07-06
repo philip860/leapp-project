@@ -11,34 +11,25 @@
     path: /usr/bin/leapp
   register: leapp_utility_check
 
-- name: Configure firewalld
-  ansible.builtin.lineinfile:
-    path: "/etc/firewalld/firewalld.conf"
-    regex: "^(#)?{{ item.key }}"
-    line: "{{ item.key }}={{ item.value }}"
-    state: present
-  loop:
-    - {key: "AllowZoneDrifting", value: "no"}
-  notify:
-    - Restart firewalld
-
-- name: Check VDO devices if present # noqa command-instead-of-module
-  ansible.builtin.shell: |
-    set -o pipefail
-    leapp answer --section check_vdo.confirm=True
-  args:
-    executable: /bin/bash
-  when: leapp_utility_check.stat.exists
-
 - name: Configure sshd
   ansible.builtin.lineinfile:
-    path: "/etc/ssh/sshd_config"
-    regex: "^(#)?{{ item.key }}"
+    path: /etc/ssh/sshd_config
+    regexp: "^(#)?{{ item.key }}"
     line: "{{ item.key }} {{ item.value }}"
     state: present
   loop:
-    - {key: "PermitRootLogin", value: "prohibit-password"}
-    - {key: "PasswordAuthentication", value: "no"}
+    - { key: "PermitRootLogin", value: "prohibit-password" }
+    - { key: "PasswordAuthentication", value: "no" }
   notify:
     - Restart sshd
+
+- name: Show leapp status for RHEL 9
+  ansible.builtin.debug:
+    msg: "Leapp is installed. RHEL 9 remediation tasks can run for RHEL 9 to RHEL 10 upgrade."
+  when: leapp_utility_check.stat.exists
+
+- name: Warn when leapp is missing
+  ansible.builtin.debug:
+    msg: "Leapp is not installed on this RHEL 9 host. Skipping Leapp-specific remediation."
+  when: not leapp_utility_check.stat.exists
 ...
