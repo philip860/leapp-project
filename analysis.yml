@@ -245,6 +245,14 @@
             )
           }}
 
+    - name: Show AWS RHUI detection status
+      ansible.builtin.debug:
+        msg:
+          - "AWS/RHUI host detected: {{ analysis_is_aws_rhui | bool }}"
+          - "System vendor: {{ ansible_system_vendor | default('unknown') }}"
+          - "Product name: {{ ansible_product_name | default('unknown') }}"
+          - "Product UUID: {{ ansible_product_uuid | default('unknown') }}"
+
     - name: Set RHUI RHEL 7 extras repo
       ansible.builtin.set_fact:
         analysis_repos_el7: rhel-7-server-rhui-extras-rpms
@@ -252,23 +260,38 @@
         - analysis_is_aws_rhui | bool
         - ansible_distribution_major_version | int == 7
 
-    - name: Set RHUI Leapp package facts
+    - name: Enable RHUI RHEL 7 extras repo when needed
+      ansible.builtin.command: yum-config-manager --enable {{ analysis_repos_el7 }}
+      changed_when: true
+      failed_when: false
+      when:
+        - analysis_is_aws_rhui | bool
+        - ansible_distribution_major_version | int == 7
+        - analysis_repos_el7 is defined
+
+    - name: Set AWS RHUI Leapp package facts
       ansible.builtin.set_fact:
         analysis_packages_el7:
+          - leapp
+          - leapp-upgrade-el7toel8
           - leapp-rhui-aws
           - cockpit
           - cockpit-system
           - cockpit-leapp
+
         analysis_packages_el8:
+          - leapp
+          - leapp-upgrade-el8toel9
           - leapp-rhui-aws
-          - leapp-upgrade
           - cockpit
           - cockpit-system
           - cockpit-leapp
           - vdo
+
         analysis_packages_el9:
           - leapp
-          - leapp-upgrade
+          - leapp-upgrade-el9toel10
+          - leapp-rhui-aws
           - cockpit
           - cockpit-system
       when: analysis_is_aws_rhui | bool
@@ -277,32 +300,27 @@
       ansible.builtin.set_fact:
         analysis_packages_el7:
           - leapp
+          - leapp-upgrade-el7toel8
           - cockpit
           - cockpit-system
           - cockpit-leapp
+
         analysis_packages_el8:
           - leapp
-          - leapp-upgrade
+          - leapp-upgrade-el8toel9
           - cockpit
           - cockpit-system
           - cockpit-leapp
           - vdo
+
         analysis_packages_el9:
           - leapp
-          - leapp-upgrade
+          - leapp-upgrade-el9toel10
           - cockpit
           - cockpit-system
       when: not analysis_is_aws_rhui | bool
 
-    - name: Check if leapp command exists
-      ansible.builtin.shell: command -v leapp
-      args:
-        executable: /bin/bash
-      register: leapp_command_check
-      changed_when: false
-      failed_when: false
-
-    - name: Install Leapp package set
+    - name: Install correct Leapp package set
       ansible.builtin.package:
         name: >-
           {{
@@ -315,16 +333,37 @@
         state: present
       register: leapp_install_result
       failed_when: false
-      when: leapp_command_check.rc != 0
 
-    - name: Re-check if leapp command exists after install
+    - name: Clean yum/dnf metadata after Leapp package install
+      ansible.builtin.shell: |
+        if command -v dnf >/dev/null 2>&1; then
+          dnf clean all
+        else
+          yum clean all
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Check if leapp command exists
       ansible.builtin.shell: command -v leapp
       args:
         executable: /bin/bash
-      register: leapp_command_recheck
+      register: leapp_command_check
       changed_when: false
       failed_when: false
-      when: leapp_command_check.rc != 0
+
+    - name: Check installed Leapp packages
+      ansible.builtin.shell: rpm -qa | grep -E '^leapp|^python3-leapp|^leapp-rhui' | sort
+      args:
+        executable: /bin/bash
+      register: leapp_installed_packages
+      changed_when: false
+      failed_when: false
+
+    - name: Show installed Leapp packages
+      ansible.builtin.debug:
+        var: leapp_installed_packages.stdout_lines
 
     - name: Fail clearly when Leapp is unavailable
       ansible.builtin.fail:
@@ -343,18 +382,14 @@
           RHSM registration is disabled.
           Enable RHSM/Satellite registration or ensure Leapp repositories are already available.
           {% endif %}
-      when:
-        - leapp_command_check.rc != 0
-        - leapp_command_recheck.rc | default(1) != 0
+      when: leapp_command_check.rc != 0
 
     - name: Show final Leapp readiness status
       ansible.builtin.debug:
         msg: >-
           Final Leapp readiness for {{ inventory_hostname }}:
           {% if leapp_command_check.rc == 0 %}
-          READY - leapp was already installed at {{ leapp_command_check.stdout }}.
-          {% elif leapp_command_recheck.rc | default(1) == 0 %}
-          READY - leapp was installed at {{ leapp_command_recheck.stdout }}.
+          READY - leapp is installed at {{ leapp_command_check.stdout }}.
           {% else %}
           NOT READY - leapp is unavailable.
           {% endif %}
@@ -362,7 +397,7 @@
   roles:
     - infra.leapp.analysis
 
-  tasks:
+  post_tasks:
     - name: Check if Leapp answerfile exists
       ansible.builtin.stat:
         path: /var/log/leapp/answerfile
@@ -408,10 +443,10 @@
               index: "{{ splunk_index }}"
               event:
                 event_type: leapp_report
-                hostname: "{{ ansible_facts.hostname }}"
+                hostname: "{{ ansible_facts.hostname | default(inventory_hostname) }}"
                 fqdn: "{{ ansible_facts.fqdn | default(inventory_hostname) }}"
                 job_id: "{{ awx_job_id | default('undefined') }}"
-                os_version: "{{ ansible_facts.distribution_version }}"
+                os_version: "{{ ansible_facts.distribution_version | default('undefined') }}"
                 virtualization_type: "{{ ansible_virtualization_type | default('unknown') }}"
                 virtualization_role: "{{ ansible_virtualization_role | default('unknown') }}"
                 system_vendor: "{{ ansible_system_vendor | default('unknown') }}"
@@ -419,8 +454,8 @@
                 rhsm_activate: "{{ rhsm_activate_requested | default(false) }}"
                 rhsm_server_url: "{{ rhsm_server_url | default('') }}"
                 rhui_host: "{{ analysis_is_aws_rhui | default(false) }}"
-                pet_app_env: "{{ ['Dev', 'Test', 'Prod'] | random(seed=ansible_facts.hostname) }}"
-                pet_app_team: "{{ ['Bird', 'Cat', 'Dog', 'Fish', 'Hamster', 'Lizard', 'Snake'] | random(seed=ansible_facts.hostname) }}"
+                pet_app_env: "{{ ['Dev', 'Test', 'Prod'] | random(seed=inventory_hostname) }}"
+                pet_app_team: "{{ ['Bird', 'Cat', 'Dog', 'Fish', 'Hamster', 'Lizard', 'Snake'] | random(seed=inventory_hostname) }}"
                 region: "{{ ansible_ec2_placement_region | default('undefined') }}"
                 report: "{{ leapp_report.content | b64decode | from_json }}"
             body_format: json
@@ -434,5 +469,6 @@
 
         - name: Show Splunk send result
           ansible.builtin.debug:
-            var: splunk_send
+            msg: "Splunk event send attempted."
           when: splunk_send is defined
+...
