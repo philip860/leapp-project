@@ -7,22 +7,22 @@
   force_handlers: true
 
   vars:
-    rhsm_activate: "{{ rhsm_activate | default(false) }}"
-    rhsm_username: "{{ rhsm_username | default('') | trim }}"
-    rhsm_password: "{{ rhsm_password | default('') | trim }}"
-    rhsm_activation_key: "{{ rhsm_activation_key | default('') | trim }}"
-    rhsm_org: "{{ rhsm_org | default('') | trim }}"
-    rhsm_server_url: "{{ rhsm_server_url | default('') | trim }}"
-    rhsm_auto_attach: "{{ rhsm_auto_attach | default(true) }}"
+    rhsm_activate_requested: "{{ rhsm_activate | default(false) | string | lower in ['true', 'yes', '1', 'on'] }}"
+    rhsm_auto_attach_requested: "{{ rhsm_auto_attach | default(true) | string | lower in ['true', 'yes', '1', 'on'] }}"
 
-    # Default to CDN unless AWS RHUI is detected below.
-    leapp_upgrade_type: "{{ leapp_upgrade_type | default('cdn') }}"
+    rhsm_username_resolved: "{{ rhsm_username | default('') | trim }}"
+    rhsm_password_resolved: "{{ rhsm_password | default('') | trim }}"
+    rhsm_activation_key_resolved: "{{ rhsm_activation_key | default('') | trim }}"
+    rhsm_org_resolved: "{{ rhsm_org | default('') | trim }}"
+    rhsm_server_url_resolved: "{{ rhsm_server_url | default('') | trim }}"
+
+    leapp_upgrade_type_default: "cdn"
+    leapp_upgrade_type_resolved: "{{ leapp_upgrade_type | default(leapp_upgrade_type_default, true) }}"
 
   pre_tasks:
-    - name: Normalize RHSM flags
+    - name: Set initial Leapp upgrade type
       ansible.builtin.set_fact:
-        rhsm_activate_requested: "{{ rhsm_activate | string | lower in ['true', 'yes', '1', 'on'] }}"
-        rhsm_auto_attach_requested: "{{ rhsm_auto_attach | string | lower in ['true', 'yes', '1', 'on'] }}"
+        leapp_upgrade_type: "{{ leapp_upgrade_type_resolved }}"
 
     - name: Validate supported RHEL major version
       ansible.builtin.assert:
@@ -52,11 +52,7 @@
         msg: >-
           RHSM activation requested for {{ inventory_hostname }}.
           Current registration status:
-          {% if rhsm_identity.rc == 0 %}
-          REGISTERED.
-          {% else %}
-          NOT REGISTERED.
-          {% endif %}
+          {{ 'REGISTERED' if rhsm_identity.rc == 0 else 'NOT REGISTERED' }}.
       when:
         - rhsm_activate_requested | bool
         - rhsm_identity is defined
@@ -66,22 +62,17 @@
         that:
           - >
             (
-              rhsm_activation_key | length > 0 and
-              rhsm_org | length > 0
+              rhsm_activation_key_resolved | length > 0 and
+              rhsm_org_resolved | length > 0
             )
             or
             (
-              rhsm_username | length > 0 and
-              rhsm_password | length > 0
+              rhsm_username_resolved | length > 0 and
+              rhsm_password_resolved | length > 0
             )
         fail_msg: >-
           rhsm_activate=true but credentials are incomplete.
-
-          Provide either:
-          - rhsm_activation_key + rhsm_org
-
-          OR:
-          - rhsm_username + rhsm_password
+          Provide either rhsm_activation_key + rhsm_org or rhsm_username + rhsm_password.
       when:
         - rhsm_activate_requested | bool
         - rhsm_identity is defined
@@ -97,20 +88,20 @@
         - rhsm_identity.rc != 0
 
     - name: Configure RHSM server URL for Satellite when provided
-      ansible.builtin.command: subscription-manager config --server.hostname={{ rhsm_server_url }}
+      ansible.builtin.command: subscription-manager config --server.hostname={{ rhsm_server_url_resolved }}
       changed_when: true
       failed_when: false
       when:
         - rhsm_activate_requested | bool
         - rhsm_identity is defined
         - rhsm_identity.rc != 0
-        - rhsm_server_url | length > 0
+        - rhsm_server_url_resolved | length > 0
 
     - name: Register host using activation key and org
       ansible.builtin.command: >
         subscription-manager register
-        --org={{ rhsm_org }}
-        --activationkey={{ rhsm_activation_key }}
+        --org={{ rhsm_org_resolved }}
+        --activationkey={{ rhsm_activation_key_resolved }}
         --force
       register: rhsm_activation_result
       changed_when: rhsm_activation_result.rc == 0
@@ -120,8 +111,8 @@
         - rhsm_activate_requested | bool
         - rhsm_identity is defined
         - rhsm_identity.rc != 0
-        - rhsm_activation_key | length > 0
-        - rhsm_org | length > 0
+        - rhsm_activation_key_resolved | length > 0
+        - rhsm_org_resolved | length > 0
 
     - name: Check RHSM status after activation-key registration
       ansible.builtin.command: subscription-manager identity
@@ -136,8 +127,8 @@
     - name: Register host using username and password
       ansible.builtin.command: >
         subscription-manager register
-        --username={{ rhsm_username }}
-        --password={{ rhsm_password }}
+        --username={{ rhsm_username_resolved }}
+        --password={{ rhsm_password_resolved }}
         --force
       register: rhsm_userpass_result
       changed_when: rhsm_userpass_result.rc == 0
@@ -148,8 +139,8 @@
         - rhsm_identity is defined
         - rhsm_identity.rc != 0
         - rhsm_after_activation_key.rc | default(1) != 0
-        - rhsm_username | length > 0
-        - rhsm_password | length > 0
+        - rhsm_username_resolved | length > 0
+        - rhsm_password_resolved | length > 0
 
     - name: Auto-attach subscription when username/password registration is used
       ansible.builtin.command: subscription-manager attach --auto
@@ -175,10 +166,10 @@
         msg:
           - "RHSM activation requested: {{ rhsm_activate_requested }}"
           - "Already registered before playbook: {{ rhsm_identity.rc == 0 if rhsm_identity is defined else false }}"
-          - "Activation key provided: {{ rhsm_activation_key | length > 0 }}"
-          - "Org provided: {{ rhsm_org | length > 0 }}"
-          - "Username/password provided: {{ rhsm_username | length > 0 and rhsm_password | length > 0 }}"
-          - "Satellite/server URL provided: {{ rhsm_server_url | length > 0 }}"
+          - "Activation key provided: {{ rhsm_activation_key_resolved | length > 0 }}"
+          - "Org provided: {{ rhsm_org_resolved | length > 0 }}"
+          - "Username/password provided: {{ rhsm_username_resolved | length > 0 and rhsm_password_resolved | length > 0 }}"
+          - "Satellite/server URL provided: {{ rhsm_server_url_resolved | length > 0 }}"
           - "Final RHSM registered: {{ rhsm_final_check.rc == 0 if rhsm_final_check is defined else false }}"
       when: rhsm_activate_requested | bool
 
@@ -186,49 +177,44 @@
       ansible.builtin.fail:
         msg: >-
           RHSM registration failed on {{ inventory_hostname }}.
-
-          Verify:
-          - rhsm_activation_key
-          - rhsm_org
-          - rhsm_username/password
-          - rhsm_server_url only if using Satellite
-
+          Verify rhsm_activation_key, rhsm_org, rhsm_username/password,
+          and rhsm_server_url only if using Satellite.
           For Red Hat hosted RHSM, leave rhsm_server_url blank.
       when:
         - rhsm_activate_requested | bool
         - rhsm_final_check is defined
         - rhsm_final_check.rc | default(1) != 0
 
-    - name: Refresh subscription and repository metadata after registration
-      ansible.builtin.shell: |
-        subscription-manager refresh || true
-
-        if command -v dnf >/dev/null 2>&1; then
-          dnf clean all
-          dnf makecache
-        else
-          yum clean all
-          yum makecache
-        fi
-      args:
-        executable: /bin/bash
-      changed_when: true
+    - name: Refresh subscription metadata
+      community.general.rhsm_repository:
+        purge: false
+      failed_when: false
       when:
         - rhsm_activate_requested | bool
         - rhsm_final_check is defined
         - rhsm_final_check.rc == 0
 
-    - name: Register yum/dnf repolist
-      ansible.builtin.shell: |
-        set -o pipefail
+    - name: Clean dnf metadata
+      ansible.builtin.command: dnf clean all
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "dnf"
 
-        if command -v dnf >/dev/null 2>&1; then
-          dnf repolist
-        else
-          yum repolist
-        fi
-      args:
-        executable: /bin/bash
+    - name: Clean yum metadata
+      ansible.builtin.command: yum clean all
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == "yum"
+
+    - name: Build package metadata cache
+      ansible.builtin.package:
+        name: bash
+        state: present
+        update_cache: true
+      changed_when: false
+
+    - name: Register yum/dnf repolist
+      ansible.builtin.command: "{{ ansible_pkg_mgr }} repolist"
       register: yum_repolist
       changed_when: false
       failed_when: false
@@ -248,10 +234,9 @@
             )
           }}
 
-    - name: Set Leapp upgrade type to RHUI for AWS RHUI hosts
+    - name: Set Leapp upgrade type for AWS RHUI hosts
       ansible.builtin.set_fact:
-        leapp_upgrade_type: rhui
-      when: analysis_is_aws_rhui | bool
+        leapp_upgrade_type: "{{ 'rhui' if analysis_is_aws_rhui | bool else leapp_upgrade_type_resolved }}"
 
     - name: Show AWS RHUI detection status
       ansible.builtin.debug:
@@ -270,8 +255,12 @@
         - ansible_distribution_major_version | int == 7
 
     - name: Enable RHUI RHEL 7 extras repo when needed
-      ansible.builtin.command: yum-config-manager --enable {{ analysis_repos_el7 }}
-      changed_when: true
+      community.general.ini_file:
+        path: "/etc/yum.repos.d/redhat-rhui.repo"
+        section: "{{ analysis_repos_el7 }}"
+        option: enabled
+        value: "1"
+        mode: "0644"
       failed_when: false
       when:
         - analysis_is_aws_rhui | bool
@@ -287,7 +276,6 @@
           - cockpit
           - cockpit-system
           - cockpit-leapp
-
         analysis_packages_el8:
           - leapp
           - leapp-upgrade-el8toel9
@@ -296,7 +284,6 @@
           - cockpit-system
           - cockpit-leapp
           - vdo
-
         analysis_packages_el9:
           - leapp
           - leapp-upgrade-el9toel10
@@ -313,7 +300,6 @@
           - cockpit
           - cockpit-system
           - cockpit-leapp
-
         analysis_packages_el8:
           - leapp
           - leapp-upgrade-el8toel9
@@ -321,7 +307,6 @@
           - cockpit-system
           - cockpit-leapp
           - vdo
-
         analysis_packages_el9:
           - leapp
           - leapp-upgrade-el9toel10
@@ -343,67 +328,47 @@
       register: leapp_install_result
       failed_when: false
 
-    - name: Clean yum/dnf metadata after Leapp package install
-      ansible.builtin.shell: |
-        if command -v dnf >/dev/null 2>&1; then
-          dnf clean all
-        else
-          yum clean all
-        fi
-      args:
-        executable: /bin/bash
-      changed_when: false
-
     - name: Check if leapp command exists
-      ansible.builtin.shell: command -v leapp
-      args:
-        executable: /bin/bash
+      ansible.builtin.command: command -v leapp
       register: leapp_command_check
       changed_when: false
       failed_when: false
 
     - name: Check installed Leapp packages
-      ansible.builtin.shell: rpm -qa | grep -E '^leapp|^python3-leapp|^leapp-rhui' | sort
-      args:
-        executable: /bin/bash
-      register: leapp_installed_packages
+      ansible.builtin.command: rpm -qa
+      register: rpm_package_list
       changed_when: false
       failed_when: false
 
+    - name: Set installed Leapp package list
+      ansible.builtin.set_fact:
+        leapp_installed_packages: >-
+          {{
+            rpm_package_list.stdout_lines
+            | select('match', '^(leapp|python3-leapp|leapp-rhui)')
+            | sort
+            | list
+          }}
+
     - name: Show installed Leapp packages
       ansible.builtin.debug:
-        var: leapp_installed_packages.stdout_lines
+        var: leapp_installed_packages
 
     - name: Fail clearly when Leapp is unavailable
       ansible.builtin.fail:
         msg: >-
           Missing Leapp package on {{ inventory_hostname }}.
           Leapp was not found and could not be installed.
-
           RHSM registration enabled: {{ rhsm_activate_requested }}.
           Leapp upgrade type: {{ leapp_upgrade_type }}.
-
-          {% if rhsm_activate_requested | bool %}
-          Check RHSM/Satellite registration, enabled repositories, or rhsm_server_url.
-          {% elif analysis_is_aws_rhui | default(false) | bool %}
-          RHSM registration is disabled and this appears to be an AWS RHUI host.
-          Check RHUI repositories and package availability.
-          {% else %}
-          RHSM registration is disabled.
-          Enable RHSM/Satellite registration or ensure Leapp repositories are already available.
-          {% endif %}
       when: leapp_command_check.rc != 0
 
     - name: Show final Leapp readiness status
       ansible.builtin.debug:
         msg: >-
           Final Leapp readiness for {{ inventory_hostname }}:
-          {% if leapp_command_check.rc == 0 %}
           READY - leapp is installed at {{ leapp_command_check.stdout }}.
           Leapp upgrade type: {{ leapp_upgrade_type }}.
-          {% else %}
-          NOT READY - leapp is unavailable.
-          {% endif %}
 
   roles:
     - infra.leapp.analysis
@@ -421,14 +386,81 @@
         replace: '\1confirm = True'
       when: leapp_answerfile.stat.exists
 
-    - name: Get report file status
+    - name: Check Leapp JSON report status
       ansible.builtin.stat:
         path: /var/log/leapp/leapp-report.json
-      register: report_file
+      register: leapp_report_json_status
+
+    - name: Check Leapp text report status
+      ansible.builtin.stat:
+        path: /var/log/leapp/leapp-report.txt
+      register: leapp_report_txt_status
+
+    - name: Load Leapp JSON report
+      ansible.builtin.slurp:
+        src: /var/log/leapp/leapp-report.json
+      register: leapp_report_json_raw
+      when: leapp_report_json_status.stat.exists
+
+    - name: Parse Leapp JSON report
+      ansible.builtin.set_fact:
+        leapp_report_parsed: "{{ leapp_report_json_raw.content | b64decode | from_json }}"
+      when: leapp_report_json_status.stat.exists
+
+    - name: Set Leapp report entries
+      ansible.builtin.set_fact:
+        leapp_report_entries: >-
+          {{
+            leapp_report_parsed.entries
+            if leapp_report_parsed.entries is defined
+            else leapp_report_parsed
+            if leapp_report_parsed is sequence
+            else []
+          }}
+      when: leapp_report_json_status.stat.exists
+
+    - name: Create Leapp text report from JSON report when missing
+      ansible.builtin.copy:
+        dest: /var/log/leapp/leapp-report.txt
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {% for item in leapp_report_entries | default([]) %}
+          Risk Factor: {{ item.severity | default('unknown') }}{% if 'inhibitor' in item.groups | default([]) %} (inhibitor){% endif %}
+
+          Title: {{ item.title | default('unknown') }}
+
+          Summary: {{ item.summary | default('') }}
+
+          {% if item.detail is defined and item.detail.external is defined %}
+          Related links:
+          {% for link in item.detail.external %}
+              - {{ link.title | default('link') }}: {{ link.url | default('') }}
+          {% endfor %}
+          {% endif %}
+
+          Key: {{ item.key | default('unknown') }}
+          ----------------------------------------
+          {% endfor %}
+      when:
+        - leapp_report_json_status.stat.exists
+        - not leapp_report_txt_status.stat.exists
+
+    - name: Recheck Leapp text report status
+      ansible.builtin.stat:
+        path: /var/log/leapp/leapp-report.txt
+      register: leapp_report_txt_final_status
+
+    - name: Show Leapp report file status
+      ansible.builtin.debug:
+        msg:
+          - "leapp-report.json exists: {{ leapp_report_json_status.stat.exists }}"
+          - "leapp-report.txt exists: {{ leapp_report_txt_final_status.stat.exists }}"
 
     - name: Log preupgrade report
       when:
-        - report_file.stat.exists
+        - leapp_report_json_status.stat.exists
         - splunk_url is defined
         - splunk_index is defined
         - splunk_hectoken is defined
@@ -437,11 +469,6 @@
           amazon.aws.ec2_metadata_facts:
           ignore_errors: true
           when: analysis_is_aws_rhui | default(false) | bool
-
-        - name: Collect JSON report results
-          ansible.builtin.slurp:
-            src: /var/log/leapp/leapp-report.json
-          register: leapp_report
 
         - name: Send event to Splunk
           ansible.builtin.uri:
@@ -463,13 +490,13 @@
                 system_vendor: "{{ ansible_system_vendor | default('unknown') }}"
                 product_name: "{{ ansible_product_name | default('unknown') }}"
                 rhsm_activate: "{{ rhsm_activate_requested | default(false) }}"
-                rhsm_server_url: "{{ rhsm_server_url | default('') }}"
+                rhsm_server_url: "{{ rhsm_server_url_resolved | default('') }}"
                 rhui_host: "{{ analysis_is_aws_rhui | default(false) }}"
                 leapp_upgrade_type: "{{ leapp_upgrade_type }}"
                 pet_app_env: "{{ ['Dev', 'Test', 'Prod'] | random(seed=inventory_hostname) }}"
                 pet_app_team: "{{ ['Bird', 'Cat', 'Dog', 'Fish', 'Hamster', 'Lizard', 'Snake'] | random(seed=inventory_hostname) }}"
                 region: "{{ ansible_ec2_placement_region | default('undefined') }}"
-                report: "{{ leapp_report.content | b64decode | from_json }}"
+                report: "{{ leapp_report_parsed | default({}) }}"
             body_format: json
             return_content: true
           delegate_to: localhost
@@ -483,19 +510,6 @@
           ansible.builtin.debug:
             msg: "Splunk event send attempted."
           when: splunk_send is defined
-          
-    #############################################################
-    # Export workflow artifacts for downstream jobs
-    # Needed by:
-    #   - upgrade.yml
-    #
-    # Example:
-    #   AWS RHUI:
-    #       leapp_upgrade_type=rhui
-    #
-    #   RHSM/Satellite/CDN:
-    #       leapp_upgrade_type=cdn
-    #############################################################
 
     - name: Pass Leapp workflow variables downstream
       ansible.builtin.set_stats:
@@ -509,5 +523,4 @@
         msg:
           - "Exported leapp_upgrade_type={{ leapp_upgrade_type }}"
           - "Exported analysis_is_aws_rhui={{ analysis_is_aws_rhui | default(false) }}"
-
 ...
