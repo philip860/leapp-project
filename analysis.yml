@@ -161,18 +161,6 @@
       failed_when: false
       when: rhsm_activate_requested | bool
 
-    - name: Show RHSM diagnostic summary
-      ansible.builtin.debug:
-        msg:
-          - "RHSM activation requested: {{ rhsm_activate_requested }}"
-          - "Already registered before playbook: {{ rhsm_identity.rc == 0 if rhsm_identity is defined else false }}"
-          - "Activation key provided: {{ rhsm_activation_key_resolved | length > 0 }}"
-          - "Org provided: {{ rhsm_org_resolved | length > 0 }}"
-          - "Username/password provided: {{ rhsm_username_resolved | length > 0 and rhsm_password_resolved | length > 0 }}"
-          - "Satellite/server URL provided: {{ rhsm_server_url_resolved | length > 0 }}"
-          - "Final RHSM registered: {{ rhsm_final_check.rc == 0 if rhsm_final_check is defined else false }}"
-      when: rhsm_activate_requested | bool
-
     - name: Fail when RHSM registration failed
       ansible.builtin.fail:
         msg: >-
@@ -185,26 +173,10 @@
         - rhsm_final_check is defined
         - rhsm_final_check.rc | default(1) != 0
 
-    - name: Refresh subscription metadata
-      community.general.rhsm_repository:
-        purge: false
-      failed_when: false
-      when:
-        - rhsm_activate_requested | bool
-        - rhsm_final_check is defined
-        - rhsm_final_check.rc == 0
-
-    - name: Clean dnf metadata
-      ansible.builtin.command: dnf clean all
+    - name: Clean package metadata
+      ansible.builtin.command: "{{ ansible_pkg_mgr }} clean all"
       changed_when: false
       failed_when: false
-      when: ansible_pkg_mgr == "dnf"
-
-    - name: Clean yum metadata
-      ansible.builtin.command: yum clean all
-      changed_when: false
-      failed_when: false
-      when: ansible_pkg_mgr == "yum"
 
     - name: Build package metadata cache
       ansible.builtin.package:
@@ -246,26 +218,6 @@
           - "System vendor: {{ ansible_system_vendor | default('unknown') }}"
           - "Product name: {{ ansible_product_name | default('unknown') }}"
           - "Product UUID: {{ ansible_product_uuid | default('unknown') }}"
-
-    - name: Set RHUI RHEL 7 extras repo
-      ansible.builtin.set_fact:
-        analysis_repos_el7: rhel-7-server-rhui-extras-rpms
-      when:
-        - analysis_is_aws_rhui | bool
-        - ansible_distribution_major_version | int == 7
-
-    - name: Enable RHUI RHEL 7 extras repo when needed
-      community.general.ini_file:
-        path: "/etc/yum.repos.d/redhat-rhui.repo"
-        section: "{{ analysis_repos_el7 }}"
-        option: enabled
-        value: "1"
-        mode: "0644"
-      failed_when: false
-      when:
-        - analysis_is_aws_rhui | bool
-        - ansible_distribution_major_version | int == 7
-        - analysis_repos_el7 is defined
 
     - name: Set AWS RHUI Leapp package facts
       ansible.builtin.set_fact:
@@ -329,30 +281,9 @@
       failed_when: false
 
     - name: Check if leapp command exists
-      ansible.builtin.command: command -v leapp
+      ansible.builtin.stat:
+        path: /usr/bin/leapp
       register: leapp_command_check
-      changed_when: false
-      failed_when: false
-
-    - name: Check installed Leapp packages
-      ansible.builtin.command: rpm -qa
-      register: rpm_package_list
-      changed_when: false
-      failed_when: false
-
-    - name: Set installed Leapp package list
-      ansible.builtin.set_fact:
-        leapp_installed_packages: >-
-          {{
-            rpm_package_list.stdout_lines
-            | select('match', '^(leapp|python3-leapp|leapp-rhui)')
-            | sort
-            | list
-          }}
-
-    - name: Show installed Leapp packages
-      ansible.builtin.debug:
-        var: leapp_installed_packages
 
     - name: Fail clearly when Leapp is unavailable
       ansible.builtin.fail:
@@ -361,19 +292,37 @@
           Leapp was not found and could not be installed.
           RHSM registration enabled: {{ rhsm_activate_requested }}.
           Leapp upgrade type: {{ leapp_upgrade_type }}.
-      when: leapp_command_check.rc != 0
+      when: not leapp_command_check.stat.exists
 
     - name: Show final Leapp readiness status
       ansible.builtin.debug:
         msg: >-
           Final Leapp readiness for {{ inventory_hostname }}:
-          READY - leapp is installed at {{ leapp_command_check.stdout }}.
+          READY - leapp is installed at /usr/bin/leapp.
           Leapp upgrade type: {{ leapp_upgrade_type }}.
 
   roles:
     - infra.leapp.analysis
 
   post_tasks:
+    - name: Remove old Leapp report artifacts before fresh preupgrade
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/log/leapp/leapp-report.json
+        - /var/log/leapp/leapp-report.txt
+        - /var/log/leapp/leapp-report.html
+        - /var/log/leapp/leapp-report.csv
+      when: leapp_command_check.stat.exists
+
+    - name: Run fresh Leapp preupgrade analysis
+      ansible.builtin.command: leapp preupgrade
+      register: leapp_fresh_preupgrade
+      changed_when: true
+      failed_when: false
+      when: leapp_command_check.stat.exists
+
     - name: Check if Leapp answerfile exists
       ansible.builtin.stat:
         path: /var/log/leapp/answerfile
@@ -386,15 +335,25 @@
         replace: '\1confirm = True'
       when: leapp_answerfile.stat.exists
 
-    - name: Check Leapp JSON report status
+    - name: Check Leapp JSON report status after fresh preupgrade
       ansible.builtin.stat:
         path: /var/log/leapp/leapp-report.json
       register: leapp_report_json_status
 
-    - name: Check Leapp text report status
+    - name: Check Leapp text report status after fresh preupgrade
       ansible.builtin.stat:
         path: /var/log/leapp/leapp-report.txt
       register: leapp_report_txt_status
+
+    - name: Fail if fresh Leapp preupgrade did not generate any report
+      ansible.builtin.fail:
+        msg: >-
+          Fresh leapp preupgrade did not generate leapp-report.json or leapp-report.txt.
+          Check /var/log/leapp/leapp-preupgrade.log on {{ inventory_hostname }}.
+          Return code: {{ leapp_fresh_preupgrade.rc | default('not-run') }}.
+      when:
+        - not leapp_report_json_status.stat.exists
+        - not leapp_report_txt_status.stat.exists
 
     - name: Load Leapp JSON report
       ansible.builtin.slurp:
@@ -428,9 +387,7 @@
         content: |
           {% for item in leapp_report_entries | default([]) %}
           Risk Factor: {{ item.severity | default('unknown') }}{% if 'inhibitor' in item.groups | default([]) %} (inhibitor){% endif %}
-
           Title: {{ item.title | default('unknown') }}
-
           Summary: {{ item.summary | default('') }}
 
           {% if item.detail is defined and item.detail.external is defined %}
@@ -439,7 +396,6 @@
               - {{ link.title | default('link') }}: {{ link.url | default('') }}
           {% endfor %}
           {% endif %}
-
           Key: {{ item.key | default('unknown') }}
           ----------------------------------------
           {% endfor %}
@@ -452,9 +408,10 @@
         path: /var/log/leapp/leapp-report.txt
       register: leapp_report_txt_final_status
 
-    - name: Show Leapp report file status
+    - name: Show fresh Leapp preupgrade result
       ansible.builtin.debug:
         msg:
+          - "Fresh leapp preupgrade rc: {{ leapp_fresh_preupgrade.rc | default('not-run') }}"
           - "leapp-report.json exists: {{ leapp_report_json_status.stat.exists }}"
           - "leapp-report.txt exists: {{ leapp_report_txt_final_status.stat.exists }}"
 
@@ -493,8 +450,6 @@
                 rhsm_server_url: "{{ rhsm_server_url_resolved | default('') }}"
                 rhui_host: "{{ analysis_is_aws_rhui | default(false) }}"
                 leapp_upgrade_type: "{{ leapp_upgrade_type }}"
-                pet_app_env: "{{ ['Dev', 'Test', 'Prod'] | random(seed=inventory_hostname) }}"
-                pet_app_team: "{{ ['Bird', 'Cat', 'Dog', 'Fish', 'Hamster', 'Lizard', 'Snake'] | random(seed=inventory_hostname) }}"
                 region: "{{ ansible_ec2_placement_region | default('undefined') }}"
                 report: "{{ leapp_report_parsed | default({}) }}"
             body_format: json
