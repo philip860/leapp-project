@@ -6,6 +6,11 @@
     delay: 5
     timeout: 300
 
+- name: Check for leapp utility
+  ansible.builtin.stat:
+    path: /usr/bin/leapp
+  register: leapp_utility_check
+
 - name: Define kernel modules to unload
   ansible.builtin.set_fact:
     kernel_modules_to_unload:
@@ -18,22 +23,28 @@
     state: absent
   loop: "{{ kernel_modules_to_unload }}"
 
-- name: Remove pam_pkcs11 module # noqa command-instead-of-module
+- name: Remove pam_pkcs11 module
   ansible.builtin.shell: |
     set -o pipefail
     leapp answer --section remove_pam_pkcs11_module_check.confirm=True
   args:
     executable: /bin/bash
+  when: leapp_utility_check.stat.exists
+
+- name: Skip pam_pkcs11 Leapp answer when leapp is missing
+  ansible.builtin.debug:
+    msg: "Skipping pam_pkcs11 Leapp answer because /usr/bin/leapp does not exist."
+  when: not leapp_utility_check.stat.exists
 
 - name: Configure sshd
   ansible.builtin.lineinfile:
-    path: "/etc/ssh/sshd_config"
-    regex: "^(#)?{{ item.key }}"
+    path: /etc/ssh/sshd_config
+    regexp: "^(#)?{{ item.key }}"
     line: "{{ item.key }} {{ item.value }}"
     state: present
   loop:
-    - {key: "PermitRootLogin", value: "prohibit-password"}
-    - {key: "PasswordAuthentication", value: "no"}
+    - { key: "PermitRootLogin", value: "prohibit-password" }
+    - { key: "PasswordAuthentication", value: "no" }
   notify:
     - Restart sshd
 ...
