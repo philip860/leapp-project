@@ -483,4 +483,31 @@
           ansible.builtin.debug:
             msg: "Splunk event send attempted."
           when: splunk_send is defined
+          
+    #############################################################
+    # Export workflow artifacts for downstream jobs
+    # Needed by:
+    #   - upgrade.yml
+    #
+    # Example:
+    #   AWS RHUI:
+    #       leapp_upgrade_type=rhui
+    #
+    #   RHSM/Satellite/CDN:
+    #       leapp_upgrade_type=cdn
+    #############################################################
+
+    - name: Pass Leapp workflow variables downstream
+      ansible.builtin.set_stats:
+        data:
+          leapp_upgrade_type: "{{ leapp_upgrade_type }}"
+          analysis_is_aws_rhui: "{{ analysis_is_aws_rhui | default(false) }}"
+        per_host: false
+
+    - name: Show exported workflow variables
+      ansible.builtin.debug:
+        msg:
+          - "Exported leapp_upgrade_type={{ leapp_upgrade_type }}"
+          - "Exported analysis_is_aws_rhui={{ analysis_is_aws_rhui | default(false) }}"
+
 ...
