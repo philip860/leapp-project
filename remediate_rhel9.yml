@@ -83,11 +83,9 @@
     - leapp_utility_check.stat.exists
     - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
 
-- name: Warn that reboot is required for NVMe native multipath remediation
-  ansible.builtin.debug:
-    msg: >-
-      NVMe native multipath was enabled in GRUB. Reboot the host before rerunning
-      leapp preupgrade so /proc/cmdline no longer contains nvme_core.multipath=N.
+- name: Set NVMe reboot required fact
+  ansible.builtin.set_fact:
+    rhel9_reboot_required: true
   when:
     - leapp_utility_check.stat.exists
     - "'nvme_core.multipath=N' in rhel9_cmdline.stdout"
@@ -128,19 +126,60 @@
     msg: >-
       Loaded kernel modules detected that may block or risk RHEL 9 to 10 upgrade:
       {{ rhel9_loaded_removed_modules.stdout_lines }}.
-      qla4xxx is a RHEL 10 removed-driver inhibitor. Do not unload automatically unless
-      you confirm the host is not using this driver for active storage/network access.
+      qla4xxx is a RHEL 10 removed-driver inhibitor and will be blacklisted,
+      removed from initramfs, and unloaded when possible.
   when:
     - leapp_utility_check.stat.exists
     - rhel9_loaded_removed_modules.stdout | length > 0
 
-- name: Fail safely when qla4xxx is loaded
-  ansible.builtin.fail:
-    msg: >-
-      qla4xxx is currently loaded and Leapp reports it as removed in RHEL 10.
-      This playbook will not automatically unload it because it may be tied to storage access.
-      Confirm the system does not require this driver, remove the dependency, rebuild initramfs
-      if needed, reboot, and rerun Leapp preupgrade.
+- name: Blacklist qla4xxx kernel module
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/blacklist-qla4xxx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
+      # qla4xxx is removed in RHEL 10 and causes a Leapp inhibitor.
+      blacklist qla4xxx
+      install qla4xxx /bin/false
+  when:
+    - leapp_utility_check.stat.exists
+    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+
+- name: Exclude qla4xxx from initramfs
+  ansible.builtin.copy:
+    dest: /etc/dracut.conf.d/omit-qla4xxx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Disabled for RHEL 9 to RHEL 10 Leapp upgrade.
+      omit_drivers+=" qla4xxx "
+  when:
+    - leapp_utility_check.stat.exists
+    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+
+- name: Attempt to unload qla4xxx module
+  ansible.builtin.command: modprobe -r qla4xxx
+  register: rhel9_unload_qla4xxx
+  changed_when: rhel9_unload_qla4xxx.rc == 0
+  failed_when: false
+  when:
+    - leapp_utility_check.stat.exists
+    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+
+- name: Rebuild initramfs after qla4xxx blacklist
+  ansible.builtin.command: dracut -f --regenerate-all
+  register: rhel9_dracut_qla4xxx
+  changed_when: rhel9_dracut_qla4xxx.rc == 0
+  when:
+    - leapp_utility_check.stat.exists
+    - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
+
+- name: Set qla4xxx reboot required fact
+  ansible.builtin.set_fact:
+    rhel9_reboot_required: true
   when:
     - leapp_utility_check.stat.exists
     - "'qla4xxx' in rhel9_loaded_removed_modules.stdout_lines"
@@ -177,9 +216,67 @@
     - rhel9_xfs_root_info.rc == 0
     - "'bigtime=1' not in rhel9_xfs_root_info.stdout"
 
+- name: Reboot host after RHEL 9 remediation changes
+  ansible.builtin.reboot:
+    msg: "Rebooting after RHEL 9 to RHEL 10 Leapp remediation changes."
+    connect_timeout: 20
+    reboot_timeout: 900
+    pre_reboot_delay: 5
+    post_reboot_delay: 30
+    test_command: whoami
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_reboot_required | default(false) | bool
+
+- name: Wait for host to come back after remediation reboot
+  ansible.builtin.wait_for_connection:
+    connect_timeout: 20
+    sleep: 10
+    delay: 10
+    timeout: 600
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_reboot_required | default(false) | bool
+
+- name: Recheck qla4xxx module after reboot
+  ansible.builtin.shell: |
+    lsmod | awk '{print $1}' | grep -x qla4xxx || true
+  register: rhel9_qla4xxx_recheck
+  changed_when: false
+  when: leapp_utility_check.stat.exists
+
+- name: Fail if qla4xxx is still loaded after reboot
+  ansible.builtin.fail:
+    msg: >-
+      qla4xxx is still loaded after blacklist, initramfs rebuild, and reboot.
+      Leapp will likely continue to report this as a RHEL 10 removed-driver inhibitor.
+      Confirm whether qla4xxx is required by active hardware/storage and remove the dependency manually.
+  when:
+    - leapp_utility_check.stat.exists
+    - rhel9_qla4xxx_recheck.stdout | length > 0
+
+- name: Confirm qla4xxx is not loaded
+  ansible.builtin.debug:
+    msg: "qla4xxx is not loaded after remediation."
+
+- name: Recheck current kernel command line after reboot
+  ansible.builtin.command: cat /proc/cmdline
+  register: rhel9_cmdline_after_reboot
+  changed_when: false
+  when: leapp_utility_check.stat.exists
+
+- name: Fail if NVMe native multipath is still disabled after reboot
+  ansible.builtin.fail:
+    msg: >-
+      nvme_core.multipath=N is still present in /proc/cmdline after remediation reboot.
+      Leapp will continue to report the NVMe native multipath inhibitor.
+  when:
+    - leapp_utility_check.stat.exists
+    - "'nvme_core.multipath=N' in rhel9_cmdline_after_reboot.stdout"
+
 - name: Final RHEL 9 remediation summary
   ansible.builtin.debug:
     msg: >-
-      RHEL 9 remediation completed. If NVMe multipath settings changed, reboot before rerunning
-      leapp preupgrade. If qla4xxx was detected, manual remediation is required before upgrade.
+      RHEL 9 remediation completed successfully. qla4xxx is not loaded, required reboot
+      remediation has completed, and the host is reachable.
 ...
